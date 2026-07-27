@@ -83,6 +83,11 @@ class Settings:
     # dependent -- run `python scripts/doctor.py` to list what resolves here.
     chat_model: str = "qwen2.5-0.5b"
     embedding_model: str = "qwen3-embedding-0.6b"
+    # Which hardware variant to ask Foundry Local for: "auto", "cpu" or "gpu".
+    # "auto" lets Foundry Local choose and falls back to CPU if the chosen
+    # variant produces unusable output -- see FoundryBackend for why that is
+    # not hypothetical on Apple Silicon.
+    device: str = "auto"
 
     # --- generation ---
     temperature: float = 0.1
@@ -110,6 +115,7 @@ class Settings:
             backend=_env_str("BACKEND", "auto").lower().strip(),
             chat_model=_env_str("CHAT_MODEL", "qwen2.5-0.5b"),
             embedding_model=_env_str("EMBEDDING_MODEL", "qwen3-embedding-0.6b"),
+            device=_env_str("DEVICE", "auto").lower().strip(),
             temperature=_env_float("TEMPERATURE", 0.1),
             max_tokens=_env_int("MAX_TOKENS", 600),
             check_groundedness=_env_str("CHECK_GROUNDEDNESS", "1").strip().lower()
@@ -136,3 +142,5 @@ class Settings:
             raise ValueError(
                 f"backend must be one of auto/foundry/hashing, got {self.backend!r}"
             )
+        if self.device not in {"auto", "cpu", "gpu"}:
+            raise ValueError(f"device must be one of auto/cpu/gpu, got {self.device!r}")

@@ -150,7 +150,7 @@ calismaya devam eder:
 ```
 [!] Foundry Local kullanilamiyor, cevrimdisi yedek backend'e gecildi.
     Sebep: Foundry Local SDK 1.x requires Python >= 3.11, ...
-    Kurulum icin: python scripts/doctor.py
+    Ayrinti icin: python scripts/doctor.py
 ```
 
 Bu uyariyi kacirirsan proje calisir ama gercek bir dil modeli **hic devreye
@@ -451,7 +451,7 @@ Ciktisi soyle olmali:
 
 ```
 Veritabani : /Users/.../foundry-local-rag/data/rag.db
-Parca      : 43
+Parca      : 54
 Belge      : 8
 ```
 
@@ -934,16 +934,26 @@ python -m app.cli ask "embedding nedir"
 
 ```
 Kaynaklar:
-  [1] 03-embedding-ve-vektor-arama.md > Tanım  (benzerlik: 0.612)
-  [2] 01-rag-nedir.md > Nasıl çalışır  (benzerlik: 0.401)
+  [1] 03-embedding-ve-vektor-arama.md > Tanım
+      guven 0.612 | anlam 0.612 | kelime 8.44 | bulan: ikisi
+  [2] 01-rag-nedir.md > Nasıl çalışır
+      guven 0.401 | anlam 0.401 | kelime 0.00 | bulan: anlam
 
   getirme: 48 ms | uretim: 2.31 sn
+
+Kaynaklilik: %100 (3/3 cumle dayanakli)
 ```
+
+`guven` cevap/reddetme kararinda kullanilan skordur; `anlam` kosinus
+benzerligi, `kelime` BM25 skoru, `bulan` ise parcayi hangi aramanin getirdigi.
+Son satir `groundedness.py`'nin cumle bazli denetimidir.
 
 - **Dogru parca listede yok** -> getirme sorunu. `--top-k` degerini yukselt,
   `--min-similarity` degerini dusur, parca boyutunu degistir.
 - **Dogru parca listede var ama cevap kotu** -> uretim sorunu. Sohbet modeli
   zayif.
+- **Cevap geldi ama `Kaynaklilik` dusuk** -> model getirilen parcalarin disina
+  cikmis. `[!]` isaretli cumleleri oku; uydurma tam orada olur.
 
 ### Sebep 1: aslinda dil modeli hic calismiyor
 
@@ -995,7 +1005,10 @@ Diger ayarlar (`.env.example` icinde hepsi listeli):
 | Degisken | Varsayilan | Ne zaman degistirilir |
 | --- | --- | --- |
 | `FRAG_TOP_K` | `4` | Dogru parca listeye girmiyorsa 6-8 dene |
-| `FRAG_MIN_SIMILARITY` | `0.15` | Cok sik "belgelerde yok" diyorsa dusur; uydurma yapiyorsa yukselt |
+| `FRAG_MIN_SIMILARITY` | `0.30` | Cok sik "belgelerde yok" diyorsa dusur; uydurma yapiyorsa yukselt. Tahmin etme: `python eval/calibrate.py` ile veriden sec |
+| `FRAG_HYBRID` | `1` | `0` yaparsan BM25 kapanir, yalnizca vektor aramasi kalir |
+| `FRAG_LEXICAL_SCALE` | `16.0` | BM25 skorunun 0.5 guvene karsilik geldigi nokta; `calibrate.py` bunu da tarar |
+| `FRAG_CHECK_GROUNDEDNESS` | `1` | `0` yaparsan cumle bazli kaynaklilik denetimi kapanir |
 | `FRAG_MAX_TOKENS` | `600` | Cevap ortadan kesiliyorsa yukselt |
 | `FRAG_TEMPERATURE` | `0.1` | Dusuk tutulmali; RAG'de yaratici cevap istemiyoruz |
 | `FRAG_CHUNK_SIZE` | `900` | Parcalar konu butunlugunu bozuyorsa |
@@ -1014,14 +1027,17 @@ python eval/evaluate.py --backend hashing
 `eval/questions.json` icinde 33 soru vardir: 25 cevaplanabilir, 8 cevaplanamaz.
 Cevaplanamayan sorular, sistemin "bilmiyorum" diyebilme yetenegini olcer.
 
-`HashingBackend` ile olculmus taban cizgisi (`top_k=4`, `min_similarity=0.15`):
+`HashingBackend` ile olculmus taban cizgisi (`top_k=4`):
 
-| Metrik | Deger |
-| --- | --- |
-| Recall@4 | %72.0 |
-| MRR | 0.650 |
-| Reddetme dogrulugu | %87.5 |
-| Genel dogruluk | %75.8 |
+| Metrik | Yalniz vektor, `min_similarity=0.15` | Hibrit + kalibre, `min_similarity=0.30` (varsayilan) |
+| --- | --- | --- |
+| Recall@4 | %72.0 | %88.0 |
+| MRR | 0.650 | 0.793 |
+| Reddetme dogrulugu | %87.5 | %100.0 |
+| Genel dogruluk | %75.8 | %90.9 |
+
+Soldaki sutunu `FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15` ile tekrar uretebilirsin;
+sagdaki sutun deponun varsayilan yapilandirmasidir.
 
 Bu sayilar **kasitli olarak vasattir**. Gercek embedding modeliyle ne kadar
 iyilestigini gormek icin referanstir. Ayni komutu Foundry Local ile calistirip
@@ -1096,25 +1112,22 @@ ve deterministik. Kendi ekledigin bir test `Settings.from_env()` cagiriyorsa
 
 ### Beklenen cikti
 
-Depo 67 test icerir ve hepsi cevrimdisi calisir:
+Test paketinin tamami cevrimdisi calisir ve saniyeler icinde biter:
 
 ```bash
 python -m pytest tests/ -q
 ```
 
 ```
-67 passed in 0.9s
+... passed in 0.9s
 ```
 
-Sayilar dosya bazinda:
+Hangi dosyada kac test oldugunu gormek icin (sayilar depo buyudukce degisir,
+o yuzden burada sabit yazilmiyor):
 
-| Dosya | Test sayisi |
-| --- | --- |
-| `tests/test_chunking.py` | 11 |
-| `tests/test_store.py` | 10 |
-| `tests/test_retrieval.py` | 14 |
-| `tests/test_prompts_and_backend.py` | 16 |
-| `tests/test_pipeline.py` | 16 |
+```bash
+python -m pytest tests/ --collect-only -q
+```
 
 Belirli bir dosyayi calistirmak icin:
 
@@ -1143,7 +1156,7 @@ flowchart TD
     H -- Hayir --> G2["python -m app.cli ingest<br/>Bolum 7"]
     G2 --> E
     H -- Evet --> I["python -m pytest tests/ -q"]
-    I --> J{"67 test geciyor mu?"}
+    I --> J{"Testler geciyor mu?"}
     J -- Hayir --> K["Bolum 14"]
     J -- Evet --> L["python -m app.cli -v ask 'RAG nedir?'"]
     L --> M{"Cevap kaliteli mi?"}
@@ -1156,7 +1169,7 @@ Diyagrami goremiyorsan ayni sira duz liste olarak:
 1. `python scripts/doctor.py` — ortam saglam mi? `[XX]` varsa once onu coz.
 2. `python -m app.cli info` — indeks var mi, hangi backend ile kurulmus?
 3. `python -m app.cli ingest` — indeks yoksa veya imza uyusmuyorsa.
-4. `python -m pytest tests/ -q` — kod tarafi saglam mi? 67 test gecmeli.
+4. `python -m pytest tests/ -q` — kod tarafi saglam mi? Hepsi gecmeli.
 5. `python -m app.cli -v ask "RAG nedir?"` — uctan uca dene, kaynaklari ve
    yuklenen model varyantini gor.
 6. Cevap kalitesi dusukse [13. bolum](#13-turkce-cevap-kalitesi-dusuk).

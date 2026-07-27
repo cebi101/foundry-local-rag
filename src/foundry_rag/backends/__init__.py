@@ -42,6 +42,7 @@ def create_backend(settings, verbose: bool = True) -> Backend:
         backend = FoundryBackend(
             chat_model=settings.chat_model,
             embedding_model=settings.embedding_model,
+            device=getattr(settings, "device", "auto"),
             verbose=verbose,
         )
         # Force real initialisation now so "auto" can fall back before the

@@ -43,7 +43,7 @@ RAG kısaltması üç aşamanın baş harflerinden gelir. Bu depoda üçü de ay
 
 | Adım | Ne yapar | Kod karşılığı |
 |---|---|---|
-| **Retrieve** (Getir) | Soruyu vektöre çevirir, bilgi tabanındaki en benzer parçaları bulur | `RagPipeline.retrieve()` -> `src/foundry_rag/pipeline.py`, ardından `search()` -> `src/foundry_rag/retrieval.py` |
+| **Retrieve** (Getir) | Soruyu vektöre çevirir, bilgi tabanındaki en ilgili parçaları bulur | `RagPipeline.retrieve()` -> `src/foundry_rag/pipeline.py`, ardından `hybrid_search()` -> `src/foundry_rag/retrieval.py` |
 | **Augment** (Zenginleştir) | Bulunan parçaları soruyla birlikte bir isteme paketler | `build_messages()` -> `src/foundry_rag/prompts.py` |
 | **Generate** (Üret) | Dil modeli istemi okur ve cevabı yazar | `Backend.chat()` / `Backend.stream_chat()` -> `src/foundry_rag/backends/` |
 
@@ -61,7 +61,7 @@ data/docs/*.md
 Sorgu tarafında `RagPipeline.retrieve()` içinde olan tam olarak şudur:
 
 1. `self.backend.embed([question])[0]` -> soru tek bir vektöre dönüşür.
-2. `search(self.store, query_vector, top_k=4, min_similarity=0.15)` -> veritabanındaki bütün vektörlerle kosinüs benzerliği hesaplanır, en yüksek 4 tanesi alınır, 0.15'in altındakiler atılır.
+2. `hybrid_search(...)` -> iki arama birlikte koşar: bütün vektörlerle kosinüs benzerliği (`retrieval.py`) ve BM25 kelime araması (`lexical.py`). İki sıralama RRF ile birleştirilir, en iyi 4 parça alınır ve güven skoru `min_similarity`'nin (varsayılan `0.30`) altında kalanlar atılır.
 
 Arama, `numpy` ile kaba kuvvet matris çarpımıdır. Bu ölçekte (bu depoda 54 parça) tek haneli milisaniye sürer; bu yüzden özel bir vektör veritabanına gerek yoktur.
 
@@ -69,7 +69,7 @@ Arama, `numpy` ile kaba kuvvet matris çarpımıdır. Bu ölçekte (bu depoda 54
 
 Bir RAG sisteminin en tehlikeli hatası, bilmediğini uydurmasıdır. Bu depo buna karşı **iki bağımsız savunma** kurar:
 
-**Savunma 1 -- benzerlik eşiği (`min_similarity = 0.15`).** `search()` hiçbir parça eşiği geçemezse boş liste döndürür. `RagPipeline.answer()` de boş listeyi görünce dil modelini hiç çağırmaz:
+**Savunma 1 -- benzerlik eşiği (`min_similarity = 0.30`).** Getirme, hiçbir parça eşiği geçemezse boş liste döndürür. `RagPipeline.answer()` de boş listeyi görünce dil modelini hiç çağırmaz:
 
 ```python
 # src/foundry_rag/pipeline.py
@@ -319,12 +319,15 @@ Backend: hashing-offline (dim=512)
 8 belge -> 54 parca (54 yeni kayit) / 0.0 sn
 ```
 
-Cevaplanabilir soru için, kaynak ve benzerlik skoru içeren bir cevap:
+Cevaplanabilir soru için, kaynak ve skorları içeren bir cevap:
 
 ```
 Kaynaklar:
-  [1] 01-rag-nedir.md > RAG'in Üç Adımı  (benzerlik: 0.159)
+  [1] 01-rag-nedir.md > RAG'in Üç Adımı
+      guven 0.512 | anlam 0.159 | kelime 16.80 | bulan: ikisi
 ```
+
+`guven` cevap/reddetme kararında kullanılan skordur (`anlam` ile doyurulmuş `kelime` skorunun büyüğü), `anlam` kosinüs benzerliği, `kelime` BM25 skoru, `bulan` ise parçayı hangi aramanın getirdiği.
 
 Cevabın sonunda şu not bulunur: `(Not: Foundry Local kurulu olmadığı için bu cevap bir dil modeli tarafından yazılmadı; belgelerden doğrudan alıntılandı.)`
 

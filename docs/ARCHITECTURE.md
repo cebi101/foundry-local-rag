@@ -9,21 +9,15 @@ Belgeyi okurken iki dosyayı yanında açık tut:
 - `src/foundry_rag/pipeline.py` — iki ana akışın tamamı burada
 - `src/foundry_rag/store.py` — veritabanı şeması ve vektör serileştirme burada
 
-Toplam kod büyüklüğü (yorumlar dahil):
+Kütüphane katmanı on bir modülden oluşur ve hiçbiri 350 satırı geçmez (yorumlar
+dahil). Güncel büyüklükleri görmek için:
 
-| Dosya | Satır |
-|---|---|
-| `src/foundry_rag/pipeline.py` | 295 |
-| `src/foundry_rag/backends/foundry.py` | 294 |
-| `src/foundry_rag/store.py` | 194 |
-| `src/foundry_rag/backends/hashing.py` | 189 |
-| `src/foundry_rag/chunking.py` | 159 |
-| `src/foundry_rag/config.py` | 121 |
-| `src/foundry_rag/prompts.py` | 80 |
-| `src/foundry_rag/retrieval.py` | 80 |
-| `src/foundry_rag/backends/__init__.py` | 65 |
-| `src/foundry_rag/backends/base.py` | 55 |
-| `src/foundry_rag/__init__.py` | 44 |
+```bash
+wc -l src/foundry_rag/*.py src/foundry_rag/backends/*.py | sort -rn
+```
+
+En büyük üçü sırasıyla `pipeline.py`, `backends/foundry.py` ve `turkish.py`'dir;
+en küçükleri `backends/base.py` ile `__init__.py`.
 
 ---
 
@@ -42,11 +36,14 @@ Toplam kod büyüklüğü (yorumlar dahil):
                             v
 +------------------------------------------------------------------+
 |  PIPELINE KATMANI                                                 |
-|  pipeline.py    ingest(), RagPipeline.answer()/stream_answer()    |
-|  chunking.py    chunk_text(), chunk_document()                    |
-|  retrieval.py   cosine_similarity(), search()                     |
-|  prompts.py     build_messages()                                  |
-|  config.py      Settings  (her katman buradan okur)               |
+|  pipeline.py      ingest(), RagPipeline.answer()/stream_answer()  |
+|  chunking.py      chunk_text(), chunk_document()                  |
+|  retrieval.py     cosine_similarity(), hybrid_search(), search()  |
+|  lexical.py       BM25Index, saturate()                           |
+|  turkish.py       expand_tokens()  (Turkce govdeleme)             |
+|  groundedness.py  check()  (cumle bazli kaynaklilik denetimi)     |
+|  prompts.py       build_messages()                                |
+|  config.py        Settings  (her katman buradan okur)             |
 |  Sorumluluk: "RAG nedir" sorusunun cevabi. Is mantigi.            |
 +--------------|---------------------------------|-----------------+
                |                                 |
@@ -66,7 +63,7 @@ Katmanların sorumlulukları ve kuralları:
 | Katman | Dosyalar | Sorumluluğu | Yasak olan |
 |---|---|---|---|
 | Arayüz | `app/cli.py`, `app/streamlit_app.py` | Kullanıcıdan soru almak, cevabı ve kaynakları yazdırmak | Chunk'lama, benzerlik hesabı, prompt kurma |
-| Pipeline | `pipeline.py`, `chunking.py`, `retrieval.py`, `prompts.py` | İndeksleme ve sorgulama akışları | `sqlite3` cümlesi yazmak, SDK çağırmak |
+| Pipeline | `pipeline.py`, `chunking.py`, `retrieval.py`, `lexical.py`, `turkish.py`, `groundedness.py`, `prompts.py` | İndeksleme ve sorgulama akışları | `sqlite3` cümlesi yazmak, SDK çağırmak |
 | Veri | `store.py` | SQLite'a yazmak/okumak, vektör serileştirme | Model çağırmak, prompt bilmek |
 | Model | `backends/` | Metni vektöre çevirmek, mesajlardan cevap üretmek | Veritabanını bilmek, chunk bilmek |
 
@@ -172,15 +169,24 @@ RagPipeline.answer("RAG nedir?")
       +--(1) RETRIEVE ------------------------------------------------
       |     retrieve(question)
       |        backend.embed([question])[0]        -> query_vector
-      |        search(store, query_vector,
-      |               top_k=4, min_similarity=0.15)      [retrieval.py]
-      |           store.load_matrix()  -> (n, dim) numpy matrisi + kayitlar
-      |           cosine_similarity(query_vector, matrix)
+      |        hybrid_search(records, matrix, query_vector,
+      |                      query_text=question, bm25=self.bm25,
+      |                      top_k=4, min_similarity=0.30,
+      |                      lexical_scale=16.0)         [retrieval.py]
+      |           cosine_similarity(query_vector, matrix)   -> anlam skorlari
       |              her iki tarafi normalize et -> tek matris carpimi
       |              boyut uyusmazsa ValueError
-      |           np.argsort(scores)[-k:][::-1]     -> en iyi k indeks
-      |           score >= min_similarity filtresi
-      |        -> list[SearchHit(record, score)], gecen sure
+      |           bm25.score_all(question)                  -> kelime skorlari
+      |           reciprocal_rank_fusion([...])             -> sirali birlesim
+      |           guven = max(anlam, saturate(kelime, lexical_scale))
+      |           guven >= min_similarity filtresi
+      |        -> list[SearchHit(record, score, dense_score,
+      |                          lexical_score, fused_score)], gecen sure
+      |
+      |     (settings.hybrid = False iken bm25 kurulmaz; ayni fonksiyon
+      |      yalnizca vektor siralamasiyla calisir. Salt vektor arayan
+      |      bagimsiz `search(store, ...)` fonksiyonu da durur ve
+      |      testlerde/kiyaslamalarda kullanilir.)
       |
       +--(2) ESIK KAPISI ---------------------------------------------
       |     if not hits:
@@ -199,15 +205,23 @@ RagPipeline.answer("RAG nedir?")
       |     backend.chat(messages, temperature=0.1, max_tokens=600)
       |        FoundryBackend -> stream_chat() ciktilarini birlestirir
       |        HashingBackend -> baglamdan cumle alintilar
+      |
+      +--(5) DENETLE (settings.check_groundedness ise) ----------------
+      |     groundedness.check(text, hits)     [groundedness.py]
+      |        cevabin her cumlesini getirilen parcalara karsi puanlar
+      |        -> GroundednessReport(score, sentences)
       v
 Answer(question, text, hits, retrieval_seconds, generation_seconds,
-       grounded=True)
+       grounded=True, groundedness=GroundednessReport(...))
       |
       v
-cmd_ask: cevabi yazdir + _print_sources(answer)
+cmd_ask: cevabi yazdir + _print_sources() + _print_groundedness()
       "Kaynaklar:
-         [1] 01-rag-nedir.md > Tanım  (benzerlik: 0.612)
-         getirme: 14 ms | uretim: 3.21 sn"
+         [1] 01-rag-nedir.md > Tanım
+             guven 0.612 | anlam 0.612 | kelime 8.44 | bulan: ikisi
+         getirme: 14 ms | uretim: 3.21 sn
+
+       Kaynaklilik: %100 (3/3 cumle dayanakli)"
 ```
 
 **Akan (streaming) varyant.** `python -m app.cli chat` içinde
@@ -242,13 +256,22 @@ Tek bir `Settings` dataclass'ı, tüm ayarlanabilir değerler. Ortam değişkenl
 | `chunk_size` | `900` | `FRAG_CHUNK_SIZE` |
 | `chunk_overlap` | `150` | `FRAG_CHUNK_OVERLAP` |
 | `top_k` | `4` | `FRAG_TOP_K` |
-| `min_similarity` | `0.15` | `FRAG_MIN_SIMILARITY` |
+| `min_similarity` | `0.30` | `FRAG_MIN_SIMILARITY` |
+| `hybrid` | `True` | `FRAG_HYBRID` |
+| `lexical_scale` | `16.0` | `FRAG_LEXICAL_SCALE` |
 | `backend` | `auto` | `FRAG_BACKEND` |
 | `chat_model` | `qwen2.5-0.5b` | `FRAG_CHAT_MODEL` |
 | `embedding_model` | `qwen3-embedding-0.6b` | `FRAG_EMBEDDING_MODEL` |
 | `temperature` | `0.1` | `FRAG_TEMPERATURE` |
 | `max_tokens` | `600` | `FRAG_MAX_TOKENS` |
+| `check_groundedness` | `True` | `FRAG_CHECK_GROUNDEDNESS` |
 | `answer_language` | `Türkçe` | `FRAG_ANSWER_LANGUAGE` |
+
+`min_similarity` ve `lexical_scale` tahmin edilmiş değerler değildir:
+`python eval/calibrate.py` 33 soruluk değerlendirme seti üzerinde ızgara taraması
+yapar ve dengeli skoru (recall ile reddetme doğruluğunun harmonik ortalaması)
+en yüksek noktayı seçer. Korpus veya embedding modeli değişirse yeniden
+kalibre edilmelidir.
 
 Dışa açtığı iki metod:
 
@@ -257,7 +280,7 @@ Settings.from_env() -> Settings     # ortamdan oku, yoksa varsayilani kullan
 settings.validate() -> None         # bozuk ayarda hemen ValueError
 ```
 
-`validate()` beş şeyi kontrol eder: `chunk_size > 0`, `chunk_overlap >= 0`,
+`validate()` altı şeyi kontrol eder: `chunk_size > 0`, `chunk_overlap >= 0`,
 `chunk_overlap < chunk_size`, `top_k > 0`, `-1 <= min_similarity <= 1`,
 `backend in {auto, foundry, hashing}`. Bunlardan en kritik olanı üçüncüsü:
 `chunk_overlap >= chunk_size` olursa parçalama ilerlemez, sonsuz döngüye girer.
@@ -337,9 +360,28 @@ SQLite yerine başka bir depo kullanmak istersen sadece bu dosya değişir;
 ```python
 normalize(matrix: np.ndarray) -> np.ndarray
 cosine_similarity(query: Sequence[float], matrix: np.ndarray) -> np.ndarray
+reciprocal_rank_fusion(rankings: Sequence[Sequence[int]],
+                       k: int = RRF_K) -> dict[int, float]
 search(store: VectorStore, query_vector: Sequence[float],
        top_k: int = 4, min_similarity: float = 0.0) -> list[SearchHit]
+hybrid_search(records, matrix, query_vector, query_text="", bm25=None,
+              top_k=4, min_similarity=0.15, rrf_k=RRF_K,
+              lexical_scale=4.0, candidate_multiplier=5) -> list[SearchHit]
 ```
+
+`search()` salt vektör aramasıdır ve testler ile kıyaslamalar için durur.
+Uygulamanın gerçek yolu `hybrid_search()`'tür: `RagPipeline.retrieve()` bunu
+çağırır. Fonksiyon imzasındaki varsayılanlar kütüphane varsayılanlarıdır;
+uygulamada geçen değerler her zaman `Settings`'ten gelir
+(`min_similarity=0.30`, `lexical_scale=16.0`).
+
+`hybrid_search()` iki aramayı birlikte koşturur — kosinüs benzerliği ve
+`lexical.py` içindeki BM25 — ve sıralamaları **Reciprocal Rank Fusion** ile
+birleştirir. Füzyon ham skora değil sıraya bakar: kosinüs `[-1, 1]` aralığında,
+BM25 ise sınırsız ve korpusa bağlıdır, dolayısıyla ham skorların ağırlıklı
+toplamı her korpusta yeniden ayar ister. Eşik karşılaştırması ise
+`max(anlam, saturate(kelime, lexical_scale))` üzerinden yapılır: bir parça
+**iki aramadan biri** ondan eminse kabul edilir.
 
 `cosine_similarity` her iki tarafı L2-normalize eder, böylece kosinüs benzerliği
 bir nokta çarpımına indirgenir: `(normalize(matrix) @ q.T).ravel()`. Boyut
@@ -349,9 +391,9 @@ indeksle").
 `normalize()` sıfır satırları sıfır bırakır (`norms[norms == 0] = 1.0`) — aksi
 halde boş bir vektör NaN üretir ve sıralama sessizce bozulur.
 
-`search()` içindeki `min_similarity` filtresi projedeki en önemli tek satırlık
-karardır. Eşik olmasaydı, cevabı belgelerde bulunmayan bir soru için bile
-"en az kötü" 4 parça dönerdi ve model onlardan bir cevap uydururdu.
+`min_similarity` filtresi projedeki en önemli tek satırlık karardır. Eşik
+olmasaydı, cevabı belgelerde bulunmayan bir soru için bile "en az kötü" 4 parça
+dönerdi ve model onlardan bir cevap uydururdu.
 
 **Neden ayrı duruyor:** Arama matematiği, depolamadan ve prompt'tan bağımsız
 olarak test edilebilir. `tests/test_retrieval.py` uydurma vektörlerle çalışır.
@@ -424,6 +466,7 @@ bağlantısı ve yüklü modeller üzerinde tekrar tekrar çalışır (durum tut
 | `retrieval_seconds` | Arama süresi |
 | `generation_seconds` | Üretim süresi |
 | `grounded` | `False` ise cevap bağlamdan değil, eşik kapısından geldi |
+| `groundedness` | `GroundednessReport` — cümle bazlı destek denetimi (kapalıysa `None`) |
 | `sources` (property) | Tekrarsız kaynak dosya listesi, en iyi eşleşme önce |
 | `total_seconds` (property) | `retrieval_seconds + generation_seconds` |
 
@@ -571,8 +614,8 @@ belirten bir not ekler. Öğrenci böylece hangi yarının çalıştığını ka
 hızlı, çevrimdışı ve deterministik olmalıdır. CI ortamında gigabaytlarca model
 indirmek bunların hiçbiri değildir.
 
-Somut olarak, 67 testin tamamı `HashingBackend` ile koşar. `conftest.py` şu üç
-fixture'ı verir:
+Somut olarak, test paketinin tamamı `HashingBackend` ile koşar. `conftest.py` şu
+üç fixture'ı verir:
 
 ```python
 @pytest.fixture
@@ -592,14 +635,18 @@ def settings(tmp_path, docs_dir) -> Settings:
 Her test kendi `tmp_path` veritabanını kullanır; testler birbirini kirletmez.
 
 Aynı backend `eval/evaluate.py` için de bir taban çizgisi görevi görür. Ölçülen
-değerler (`top_k=4`, `min_similarity=0.15`, 33 soruluk set):
+değerler (`top_k=4`, 33 soruluk set):
 
-| Metrik | HashingBackend |
-|---|---|
-| Recall@4 | %72.0 |
-| MRR | 0.650 |
-| Reddetme doğruluğu | %87.5 |
-| Genel doğruluk | %75.8 |
+| Metrik | Yalnız vektör, `min_similarity=0.15` | Hibrit + kalibre, `min_similarity=0.30` (varsayılan) |
+|---|---|---|
+| Recall@4 | %72.0 | %88.0 |
+| MRR | 0.650 | 0.793 |
+| Reddetme doğruluğu | %87.5 | %100.0 |
+| Genel doğruluk | %75.8 | %90.9 |
+
+Soldaki sütun `FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15` ile yeniden üretilebilir;
+sağdaki sütun deponun varsayılan yapılandırmasıdır. İki sütun arasındaki fark,
+BM25 eklemenin ve eşiği veriden seçmenin birlikte kazandırdığıdır.
 
 Bu sonuç bilerek vasattır. `python eval/evaluate.py --backend hashing` ile bu
 taban çizgisini, `python eval/evaluate.py` ile gerçek embedding modelinin
@@ -797,7 +844,11 @@ kosinüs benzerliği sonucunu ise ölçülebilir biçimde değiştirmez.
 | `foundry` modu sert başarısız oluyor | Her zaman sessizce yedeğe geçmek | Ortam kurulduktan sonra bozuk bir kurulumun sessizce yavaş/yanlış çalışması, hata vermesinden daha kötü |
 | `ingest(reset=True)` varsayılan | Artımlı güncelleme | Silinen veya düzenlenen bir belgenin bayat parçalarını geride bırakmayan tek strateji bu; bu korpus boyutunda yeniden kurmak zaten ucuz |
 | `content_hash` `UNIQUE` + `INSERT OR IGNORE` | Her seferinde koşulsuz `INSERT` | `--append` ile tekrar indeksleme kopya satır üretmiyor |
-| `min_similarity = 0.15` eşiği | Her zaman `top_k` parça döndürmek | Eşik olmadan cevabı belgelerde olmayan soru için "en az kötü" parçalar döner ve model onlardan cevap uydurur |
+| `min_similarity = 0.30` eşiği | Her zaman `top_k` parça döndürmek | Eşik olmadan cevabı belgelerde olmayan soru için "en az kötü" parçalar döner ve model onlardan cevap uydurur |
+| Eşiğin `eval/calibrate.py` ile veriden seçilmesi | Makul görünen bir sayı yazmak | Tahminin bedeli ölçüldü: `0.15` yalnız-vektör skorları için ayarlanmıştı, BM25 eklenince skor dağılımı kaydı ve reddetme doğruluğu %87.5'ten %12.5'e düştü. Doğru eşik korpusa ve retriever'a bağlıdır |
+| Hibrit getirme (BM25 + vektör), RRF ile füzyon | Yalnızca kosinüs benzerliği | İki arama farklı yerlerde başarısız olur: vektör nadir literalleri (`1536`, model adı), kelime araması eş anlamlıları kaçırır. Recall birleşim olur, kesişim değil |
+| Füzyonun **sıra** üzerinden yapılması | Ham skorların ağırlıklı toplamı | Kosinüs `[-1, 1]`, BM25 sınırsız ve korpusa bağlı; ham toplam her korpusta yeniden ayar ister, sıralar kalibrasyonsuz karşılaştırılabilir |
+| Üretimden sonra cümle bazlı kaynaklılık denetimi (`groundedness.py`) | Cevabı olduğu gibi sunmak | Doğru parçayı getirmek modelin o parçanın içinde kaldığını göstermez; uydurulmuş bir cümle, yanındaki kaynak etiketiyle doğrusundan ayırt edilemez görünür. Denetim model çağrısı gerektirmez |
 | `hits` boşken model **hiç** çağrılmıyor | Boş bağlamla modeli çağırıp "bilmiyorum" demesini ummak | `qwen2.5-0.5b` gibi küçük bir model boş bağlamda kuralı unutup uyduruyor. Ayrıca gereksiz saniyeler harcanmıyor |
 | `embedding_signature` meta satırı | Hiçbir şey saklamamak | Vektör uzayı değiştiğinde sistem sessizce yanlış sonuç üretmek yerine açık hata veriyor (bölüm 5) |
 | Embed'e başlık öneki (`with_heading_prefix()`) | Ham parça metnini embed etmek | Belgeden koparılmış parça hangi bölüme ait olduğunu kaybediyor; başlık öneki yapılandırılmış belgelerde eşleşmeyi iyileştiriyor |
@@ -878,8 +929,9 @@ parça için kalan yeri azaltır. Küçük modellerde bu takas hızla zarara dö
 
 | Yok olan | Sonucu | Nerede eklenirdi |
 |---|---|---|
-| Yeniden sıralama (reranker) | `top_k` parça sadece kosinüs skoruna göre seçilir | `retrieval.py`, `search()` sonrası |
-| Hibrit arama (BM25 + vektör) | Tam kelime eşleşmeleri ekstra ağırlık almaz | `retrieval.py` |
+| Yeniden sıralama (reranker) | `top_k` parça füzyon sırasına göre seçilir; ikinci bir model onları yeniden puanlamaz | `retrieval.py`, `hybrid_search()` sonrası |
+| Sorgu genişletme için LLM kullanımı | Sorgu, kullanıcının yazdığı hâliyle aranır | `pipeline.py`, `retrieve()` |
+| Doğal dil çıkarımı (NLI) ile kaynaklılık | `groundedness.py` kelime örtüşmesine bakar; çelişkiyi ve ortak kelimesiz eş anlamlıyı yakalayamaz | `groundedness.py`, `support_score()` |
 | Artımlı indeksleme | Bir belge değişince tüm indeks yeniden kurulur | `pipeline.py`, `ingest()` |
 | PDF / DOCX / HTML okuma | Sadece `.md`, `.markdown`, `.txt`, `.rst` (`TEXT_SUFFIXES`) | `pipeline.py`, `iter_documents()` |
 | Sorgu genişletme / yeniden yazma | Kötü ifade edilmiş soru kötü sonuç verir | `pipeline.py`, `retrieve()` |

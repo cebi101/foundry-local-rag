@@ -158,7 +158,8 @@ başlıyorsa `[XX]` işaretiyle raporlar.
 Sistem Python'unun `sqlite3` modülü uzantı yükleyemez (`enable_load_extension` yok), bu
 yüzden `sqlite-vec` gibi vektör uzantıları kullanılamaz. **Bu proje için sorun değil:**
 `src/foundry_rag/retrieval.py` içindeki `cosine_similarity()` aramayı numpy ile kaba
-kuvvet yapar. `doctor.py` bunu `[!!]` (uyarı) olarak gösterir, hata olarak değil.
+kuvvet yapar (kelime tarafı da saf Python/numpy: `lexical.py` içindeki BM25).
+`doctor.py` bunu `[!!]` (uyarı) olarak gösterir, hata olarak değil.
 
 ---
 
@@ -800,7 +801,7 @@ Sonra bölüm 3'ten devam et.
 - [ ] `which python` → `.../.venv/bin/python`
 - [ ] `pip show foundry-local-sdk` → `Version: 1.x`
 - [ ] `python scripts/doctor.py` → `Her sey yolunda gorunuyor.`
-- [ ] `python -m pytest tests/ -q` → 67 test geçti
+- [ ] `python -m pytest tests/ -q` → tüm testler geçti
 - [ ] `python -m app.cli ingest` → `Backend: foundry-local (... dim=1024)`
 - [ ] `python -m app.cli info` → `Parca : 54`, `Belge : 8`
 - [ ] `python -m app.cli ask "..."` → cevap + `Kaynaklar:` bloğu

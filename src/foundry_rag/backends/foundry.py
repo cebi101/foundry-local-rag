@@ -69,6 +69,52 @@ def _progress_printer(label: str) -> Callable[[float], None]:
     return _cb
 
 
+def _variant_provider(variant) -> str:
+    """Execution provider string of a model variant, lowercased.
+
+    Case matters and cannot be trusted: the remote catalog spells it
+    ``WebGPUExecutionProvider`` while the local cache the SDK reads back spells
+    it ``WebGpuExecutionProvider``. An exact-match comparison silently never
+    matches, so everything here compares lowercased substrings.
+    """
+    runtime = getattr(getattr(variant, "info", None), "runtime", None)
+    return str(getattr(runtime, "execution_provider", "") or "").lower()
+
+
+def select_device_variant(model, device: str, verbose: bool = False) -> bool:
+    """Force the CPU or GPU variant of a model. Returns True if it switched."""
+    if device not in {"cpu", "gpu"}:
+        return False
+    wanted = "cpu" if device == "cpu" else "gpu"
+    for variant in getattr(model, "variants", []) or []:
+        if wanted in _variant_provider(variant):
+            if getattr(variant, "id", None) == getattr(model, "id", None):
+                return False
+            model.select_variant(variant)
+            if verbose:
+                print(f"  varyant secildi: {variant.id}")
+            return True
+    return False
+
+
+def _is_non_finite_failure(error: Exception) -> bool:
+    """Detect the WebGPU variant emitting Inf/NaN inside the embedding vector.
+
+    On Apple Silicon the auto-selected ``*-generic-gpu`` variant of
+    ``qwen3-embedding-0.6b`` returns non-finite floats. The failure surfaces far
+    from the cause -- as a .NET ``JsonSerializer`` exception while the SDK tries
+    to write the vector out:
+
+        System.ArgumentException: .NET number values such as positive and
+        negative infinity cannot be written as valid JSON.
+
+    Verified on macOS 14.6 / M-series, SDK 1.2.3, 2026-07-27. The CPU variant of
+    the same model works and returns clean 1024-dim vectors.
+    """
+    text = str(error).lower()
+    return "infinity" in text or "cannot be written as valid json" in text
+
+
 def describe_variant(model) -> str:
     """Report which hardware variant actually got selected.
 
@@ -96,12 +142,14 @@ class FoundryBackend(Backend):
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         app_name: str = "foundry_local_rag",
         model_cache_dir: str | None = None,
+        device: str = "auto",
         verbose: bool = True,
     ) -> None:
         self.chat_model_alias = chat_model
         self.embedding_model_alias = embedding_model
         self.app_name = app_name
         self.model_cache_dir = model_cache_dir
+        self.device = device
         self.verbose = verbose
 
         self._manager = None
@@ -164,6 +212,8 @@ class FoundryBackend(Backend):
                 f"Aliases are hardware-dependent. Available here: {available}"
             ) from exc
 
+        select_device_variant(model, self.device, self.verbose)
+
         if not getattr(model, "is_cached", False):
             if self.verbose:
                 print(f"  Downloading {label} model ({alias})...")
@@ -175,6 +225,29 @@ class FoundryBackend(Backend):
         if self.verbose:
             print(f"  {label}: {describe_variant(model)}")
         return model
+
+    def _switch_embedding_to_cpu(self) -> bool:
+        """Rebuild the embedding client on the CPU variant. True if it changed."""
+        if self._embedding_model is None:
+            return False
+        try:
+            self._embedding_model.unload()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        if not select_device_variant(self._embedding_model, "cpu", self.verbose):
+            return False
+        if not getattr(self._embedding_model, "is_cached", False):
+            if self.verbose:
+                print("  CPU varyanti indiriliyor...")
+            self._embedding_model.download(
+                _progress_printer("embedding-cpu") if self.verbose else None
+            )
+            if self.verbose:
+                print()
+        self._embedding_model.load()
+        self._embedding_client = self._embedding_model.get_embedding_client()
+        self.device = "cpu"
+        return True
 
     # -- introspection ---------------------------------------------------
 
@@ -221,10 +294,27 @@ class FoundryBackend(Backend):
         items = list(texts)
         if not items:
             return []
+
         try:
             response = client.generate_embeddings(items)
         except Exception as exc:  # noqa: BLE001
+            # The GPU variant can emit Inf/NaN, which blows up inside the SDK's
+            # serializer rather than at the model. Recover onto CPU once instead
+            # of failing the whole ingestion run -- see _is_non_finite_failure.
+            if self.device != "cpu" and _is_non_finite_failure(exc):
+                if self.verbose:
+                    print(
+                        "\n  [!] GPU varyanti gecersiz sayi (Inf/NaN) uretti. "
+                        "CPU varyantina geciliyor.\n"
+                        "      (Foundry Local'in WebGPU embedding varyantinda "
+                        "bilinen sorun; kalici olarak FRAG_DEVICE=cpu kullan.)"
+                    )
+                if self._switch_embedding_to_cpu():
+                    self._dim = None
+                    response = self._embedding_client.generate_embeddings(items)
+                    return [list(item.embedding) for item in response.data]
             raise BackendError(f"Embedding generation failed: {exc}") from exc
+
         return [list(item.embedding) for item in response.data]
 
     # -- chat ------------------------------------------------------------
