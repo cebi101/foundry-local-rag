@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from .base import Backend, BackendError, BackendUnavailable
 from .hashing import HashingBackend
 
@@ -54,12 +56,15 @@ def create_backend(settings, verbose: bool = True) -> Backend:
         try:
             return _build_foundry()
         except (BackendUnavailable, BackendError) as exc:
-            if verbose:
-                print(
-                    "\n[!] Foundry Local kullanilamiyor, cevrimdisi yedek backend'e "
-                    f"gecildi.\n    Sebep: {exc}\n"
-                    "    Kurulum icin: python scripts/doctor.py\n"
-                )
+            # Always announce the downgrade, even when quiet. Silently answering
+            # with a different (much weaker) model than the user asked for is
+            # exactly the kind of thing that must never be invisible.
+            print(
+                "\n[!] Foundry Local kullanilamiyor, cevrimdisi yedek backend'e "
+                f"gecildi.\n    Sebep: {exc}\n"
+                "    Ayrinti icin: python scripts/doctor.py\n",
+                file=sys.stderr,
+            )
             return HashingBackend()
 
     raise ValueError(f"Unknown backend: {choice!r}")
