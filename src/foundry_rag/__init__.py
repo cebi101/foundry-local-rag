@@ -16,29 +16,42 @@ from __future__ import annotations
 from .backends import Backend, BackendError, BackendUnavailable, create_backend
 from .chunking import Chunk, chunk_document, chunk_text
 from .config import PROJECT_ROOT, Settings
+from .groundedness import GroundednessReport, SentenceVerdict
+from .lexical import BM25Index
 from .pipeline import Answer, IngestReport, RagPipeline, ingest
-from .retrieval import SearchHit, cosine_similarity, search
+from .retrieval import (
+    SearchHit,
+    cosine_similarity,
+    hybrid_search,
+    reciprocal_rank_fusion,
+    search,
+)
 from .store import ChunkRecord, VectorStore
 
 __version__ = "1.0.0"
 
 __all__ = [
     "Answer",
+    "BM25Index",
     "Backend",
     "BackendError",
     "BackendUnavailable",
     "Chunk",
     "ChunkRecord",
+    "GroundednessReport",
     "IngestReport",
     "PROJECT_ROOT",
     "RagPipeline",
     "SearchHit",
+    "SentenceVerdict",
     "Settings",
     "VectorStore",
     "chunk_document",
     "chunk_text",
     "cosine_similarity",
     "create_backend",
+    "hybrid_search",
     "ingest",
+    "reciprocal_rank_fusion",
     "search",
 ]

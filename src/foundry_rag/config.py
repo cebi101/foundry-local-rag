@@ -63,7 +63,16 @@ class Settings:
 
     # --- retrieval ---
     top_k: int = 4
-    min_similarity: float = 0.15
+    # These two are NOT guesses. They are the argmax of `python eval/calibrate.py`
+    # over the 33-question evaluation set (balanced score 93.6%: recall 88.0%,
+    # refusal accuracy 100.0%). Re-run calibration whenever the corpus or the
+    # embedding model changes -- the right threshold moves with them.
+    min_similarity: float = 0.30
+    # Hybrid = dense vectors + BM25 keywords, fused by reciprocal rank fusion.
+    # Set False to compare against dense-only retrieval (a Week 3 exercise).
+    hybrid: bool = True
+    # BM25 saturation point: the raw score at which lexical confidence hits 0.5.
+    lexical_scale: float = 16.0
 
     # --- models ---
     # "auto"    -> use Foundry Local if reachable, otherwise the offline fallback
@@ -78,6 +87,10 @@ class Settings:
     # --- generation ---
     temperature: float = 0.1
     max_tokens: int = 600
+    # After generating, check every sentence of the answer against the
+    # retrieved passages and flag the ones with no support. Cheap (no model
+    # call) and it is what catches the model filling gaps on its own.
+    check_groundedness: bool = True
 
     # --- misc ---
     answer_language: str = "Türkçe"
@@ -91,12 +104,16 @@ class Settings:
             chunk_size=_env_int("CHUNK_SIZE", 900),
             chunk_overlap=_env_int("CHUNK_OVERLAP", 150),
             top_k=_env_int("TOP_K", 4),
-            min_similarity=_env_float("MIN_SIMILARITY", 0.15),
+            min_similarity=_env_float("MIN_SIMILARITY", 0.30),
+            hybrid=_env_str("HYBRID", "1").strip().lower() not in {"0", "false", "no"},
+            lexical_scale=_env_float("LEXICAL_SCALE", 16.0),
             backend=_env_str("BACKEND", "auto").lower().strip(),
             chat_model=_env_str("CHAT_MODEL", "qwen2.5-0.5b"),
             embedding_model=_env_str("EMBEDDING_MODEL", "qwen3-embedding-0.6b"),
             temperature=_env_float("TEMPERATURE", 0.1),
             max_tokens=_env_int("MAX_TOKENS", 600),
+            check_groundedness=_env_str("CHECK_GROUNDEDNESS", "1").strip().lower()
+            not in {"0", "false", "no"},
             answer_language=_env_str("ANSWER_LANGUAGE", "Türkçe"),
         )
 

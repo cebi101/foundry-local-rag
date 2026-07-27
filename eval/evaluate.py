@@ -210,6 +210,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-save", action="store_true", help="Sonuclari results.jsonl'e yazma"
     )
+    parser.add_argument(
+        "--gate",
+        action="store_true",
+        help="Kalite kapisi: metrikler esiklerin altina duserse cikis kodu 1 dondur (CI icin)",
+    )
+    parser.add_argument("--min-recall", type=float, default=0.84)
+    parser.add_argument("--min-refusal", type=float, default=0.95)
+    parser.add_argument("--min-overall", type=float, default=0.87)
     args = parser.parse_args(argv)
 
     payload = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))
@@ -253,7 +261,55 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         print(f"\nSonuclar eklendi: {RESULTS_PATH}")
 
+    if args.gate:
+        return run_quality_gate(summary, args)
+
     return 0 if summary["overall_accuracy"] > 0 else 1
+
+
+def run_quality_gate(summary: dict, args: argparse.Namespace) -> int:
+    """Fail the build when retrieval quality regresses.
+
+    Tests catch code that breaks. They do not catch a prompt tweak or a chunk
+    size change that quietly costs ten points of recall -- that is a regression
+    only an evaluation set can see. Wiring this into CI makes retrieval quality
+    a build-breaking property like any other.
+
+    Thresholds sit slightly below the current measured values, so ordinary
+    noise does not fail the build but a real drop does.
+    """
+    checks = [
+        ("Recall@K", summary["recall_at_k"], args.min_recall),
+        ("Reddetme dogrulugu", summary["refusal_accuracy"], args.min_refusal),
+        ("Genel dogruluk", summary["overall_accuracy"], args.min_overall),
+    ]
+
+    print("\n" + "=" * 78)
+    print("  KALITE KAPISI")
+    print("=" * 78)
+
+    failures = []
+    for name, actual, minimum in checks:
+        passed = actual >= minimum
+        mark = "GECTI" if passed else "KALDI"
+        print(f"  [{mark}] {name:22s} {actual:.1%}  (esik: {minimum:.1%})")
+        if not passed:
+            failures.append(f"{name}: {actual:.1%} < {minimum:.1%}")
+
+    print("=" * 78)
+    if failures:
+        print("\nKalite kapisi BASARISIZ:")
+        for failure in failures:
+            print(f"  - {failure}")
+        print(
+            "\nGetirme kalitesi dustu. Ya degisikligi geri al, ya da\n"
+            "  python eval/calibrate.py\n"
+            "calistirip esikleri yeniden kalibre et ve dususun kasitli oldugunu dogrula."
+        )
+        return 1
+
+    print("\nTum kontroller gecti.")
+    return 0
 
 
 if __name__ == "__main__":

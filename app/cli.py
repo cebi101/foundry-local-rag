@@ -37,11 +37,31 @@ def _print_sources(answer) -> None:
         return
     print("\nKaynaklar:")
     for i, hit in enumerate(answer.hits, start=1):
-        print(f"  [{i}] {hit.record.citation}  (benzerlik: {hit.score:.3f})")
+        print(
+            f"  [{i}] {hit.record.citation}\n"
+            f"      guven {hit.score:.3f} | anlam {hit.dense_score:.3f} | "
+            f"kelime {hit.lexical_score:.2f} | bulan: {hit.matched_by}"
+        )
     print(
         f"\n  getirme: {answer.retrieval_seconds * 1000:.0f} ms | "
         f"uretim: {answer.generation_seconds:.2f} sn"
     )
+
+
+def _print_groundedness(answer) -> None:
+    """Show which sentences the retrieved context actually supports."""
+    report = answer.groundedness
+    if report is None or not report.sentences:
+        return
+    print(f"\n{report.summary()}")
+    for verdict in report.unsupported:
+        snippet = verdict.text[:110] + ("..." if len(verdict.text) > 110 else "")
+        print(f"  [!] ({verdict.score:.2f}) {snippet}")
+    if report.unsupported:
+        print(
+            "      ^ Bu cumleler getirilen belgelerde dogrulanamadi. "
+            "Modelin kendi ezberinden eklemis olabilecegi kisimlar bunlar."
+        )
 
 
 # -- commands ------------------------------------------------------------
@@ -70,6 +90,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         print(f"\n{answer.text}")
         if args.show_sources:
             _print_sources(answer)
+            _print_groundedness(answer)
     return 0
 
 

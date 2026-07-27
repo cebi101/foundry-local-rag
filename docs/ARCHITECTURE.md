@@ -1,0 +1,925 @@
+# Mimari
+
+Bu belge, projenin kodunun neden bu şekilde bölündüğünü anlatır. Anlatılan her
+fonksiyon adı, tablo şeması ve varsayılan değer `src/` ve `app/` altındaki
+gerçek dosyalardan alınmıştır.
+
+Belgeyi okurken iki dosyayı yanında açık tut:
+
+- `src/foundry_rag/pipeline.py` — iki ana akışın tamamı burada
+- `src/foundry_rag/store.py` — veritabanı şeması ve vektör serileştirme burada
+
+Toplam kod büyüklüğü (yorumlar dahil):
+
+| Dosya | Satır |
+|---|---|
+| `src/foundry_rag/pipeline.py` | 295 |
+| `src/foundry_rag/backends/foundry.py` | 294 |
+| `src/foundry_rag/store.py` | 194 |
+| `src/foundry_rag/backends/hashing.py` | 189 |
+| `src/foundry_rag/chunking.py` | 159 |
+| `src/foundry_rag/config.py` | 121 |
+| `src/foundry_rag/prompts.py` | 80 |
+| `src/foundry_rag/retrieval.py` | 80 |
+| `src/foundry_rag/backends/__init__.py` | 65 |
+| `src/foundry_rag/backends/base.py` | 55 |
+| `src/foundry_rag/__init__.py` | 44 |
+
+---
+
+## 1. Dört katman
+
+```
++------------------------------------------------------------------+
+|  ARAYUZ KATMANI                                                   |
+|  app/cli.py            ingest / ask / chat / info                 |
+|  app/streamlit_app.py  tarayici arayuzu                           |
+|  scripts/doctor.py     ortam kontrolu                             |
+|  eval/evaluate.py      olcum                                      |
+|  Sorumluluk: girdi almak, ciktiyi bicimlendirmek. Baska hicbir sey.|
++---------------------------|--------------------------------------+
+                            | Settings, ingest(), RagPipeline
+                            v
++------------------------------------------------------------------+
+|  PIPELINE KATMANI                                                 |
+|  pipeline.py    ingest(), RagPipeline.answer()/stream_answer()    |
+|  chunking.py    chunk_text(), chunk_document()                    |
+|  retrieval.py   cosine_similarity(), search()                     |
+|  prompts.py     build_messages()                                  |
+|  config.py      Settings  (her katman buradan okur)               |
+|  Sorumluluk: "RAG nedir" sorusunun cevabi. Is mantigi.            |
++--------------|---------------------------------|-----------------+
+               |                                 |
+               v                                 v
++----------------------------+   +-------------------------------------+
+|  VERI KATMANI              |   |  MODEL KATMANI                      |
+|  store.py                  |   |  backends/base.py     Backend (ABC)  |
+|  VectorStore               |   |  backends/hashing.py  HashingBackend |
+|  encode_vector()           |   |  backends/foundry.py  FoundryBackend |
+|  decode_vector()           |   |  backends/__init__.py create_backend |
+|  data/rag.db (SQLite)      |   |  Sorumluluk: embed() ve chat()      |
++----------------------------+   +-------------------------------------+
+```
+
+Katmanların sorumlulukları ve kuralları:
+
+| Katman | Dosyalar | Sorumluluğu | Yasak olan |
+|---|---|---|---|
+| Arayüz | `app/cli.py`, `app/streamlit_app.py` | Kullanıcıdan soru almak, cevabı ve kaynakları yazdırmak | Chunk'lama, benzerlik hesabı, prompt kurma |
+| Pipeline | `pipeline.py`, `chunking.py`, `retrieval.py`, `prompts.py` | İndeksleme ve sorgulama akışları | `sqlite3` cümlesi yazmak, SDK çağırmak |
+| Veri | `store.py` | SQLite'a yazmak/okumak, vektör serileştirme | Model çağırmak, prompt bilmek |
+| Model | `backends/` | Metni vektöre çevirmek, mesajlardan cevap üretmek | Veritabanını bilmek, chunk bilmek |
+
+Bunu somut olarak test edebilirsin: `src/foundry_rag/store.py` içinde `backend`
+kelimesi geçmez, `src/foundry_rag/backends/` altında `sqlite3` geçmez.
+`app/streamlit_app.py` dosyasının başındaki yorum da bunu söyler: cevabın nasıl
+üretildiğini değiştirmek istiyorsan `foundry_rag.pipeline` dosyasını değiştir,
+arayüz dosyasını değil.
+
+---
+
+## 2. İki akış
+
+Proje iki farklı hızda çalışan iki akıştan ibarettir. Bunları ayırmak, uygulamanın
+her açılışta tüm belgeleri yeniden embed etmesini engeller.
+
+| | İndeksleme (ingest) | Sorgulama (query) |
+|---|---|---|
+| Ne zaman çalışır | Belgeler değişince | Her soruda |
+| Giriş noktası | `ingest()` (fonksiyon) | `RagPipeline` (sınıf) |
+| Model kullanımı | Sadece embedding | Embedding + chat |
+| Sonucu | `IngestReport` | `Answer` |
+| Yan etkisi | `data/rag.db` yazılır | Yok (salt okuma) |
+
+### 2.1 İndeksleme akışı
+
+Komut: `python -m app.cli ingest`
+
+```
+python -m app.cli ingest
+      |
+      v
+cmd_ingest(args)                                     [app/cli.py]
+      |  Settings.from_env() + CLI bayraklari (--chunk-size, --backend, ...)
+      |  settings.validate()      <- burada patlarsa hicbir sey yazilmaz
+      v
+create_backend(settings, verbose=True)     [backends/__init__.py]
+      |  "hashing" -> HashingBackend()
+      |  "foundry" -> FoundryBackend(...)  (basarisizsa hata)
+      |  "auto"    -> FoundryBackend, olmazsa uyari + HashingBackend
+      v
+ingest(settings, backend=backend, reset=not args.append)   [pipeline.py]
+      |
+      +--(1)-- iter_documents(settings.docs_dir)
+      |          data/docs/*.md, *.markdown, *.txt, *.rst  (TEXT_SUFFIXES)
+      |          -> ("01-rag-nedir.md", "# RAG Nedir...")
+      |          bos dosyalar report.skipped listesine yazilir
+      |
+      +--(2)-- chunk_document(text, source=name,
+      |                       chunk_size=900, chunk_overlap=150)
+      |          -> [Chunk(source, index, heading, text), ...]
+      |
+      +--(3)-- VectorStore(settings.db_path)
+      |          reset=True ise store.reset()  (DELETE FROM chunks + index_meta)
+      |
+      +--(4)-- _batched(all_chunks, EMBED_BATCH_SIZE=16)
+      |          her parti icin:
+      |             backend.embed([c.with_heading_prefix() for c in batch])
+      |                -> list[list[float]]     (uzunluk kontrol edilir)
+      |             store.add_chunks((source, index, heading, text,
+      |                               content_hash, vector) ...)
+      |                -> INSERT OR IGNORE ... (content_hash UNIQUE)
+      |             ekrana: "Embedding: 48/132 parca"
+      |
+      +--(5)-- store.set_meta(...)   5 satir yazilir:
+      |          embedding_signature, chunk_size, chunk_overlap,
+      |          backend, document_count
+      v
+IngestReport(documents=8, chunks=..., inserted=..., seconds=..., skipped=[])
+report.summary()  ->  "8 belge -> N parca (N yeni kayit) / X.X sn"
+```
+
+Dikkat edilecek üç nokta:
+
+1. **Embed edilen metin, saklanan metinden farklıdır.** `backend.embed()` çağrısına
+   `c.with_heading_prefix()` gider — yani `"Bölüm başlığı\n\ntext"`. Veritabanına
+   `content` sütununa ise sadece `c.text` yazılır. Başlık, parçanın hangi bölüme
+   ait olduğunu vektöre taşımak için embed'e eklenir.
+2. **Vektör uzunluğu doğrulanır.** Backend `len(batch)` kadar metin için farklı
+   sayıda vektör dönerse `ingest()` `RuntimeError` fırlatır. Sessiz kayma olmaz.
+3. **`reset=True` varsayılandır.** `--append` bayrağı verilmedikçe indeks
+   sıfırdan kurulur.
+
+### 2.2 Sorgulama akışı
+
+Komut: `python -m app.cli ask "RAG nedir?"`
+
+```
+python -m app.cli ask "RAG nedir?"
+      |
+      v
+cmd_ask(args)                                        [app/cli.py]
+      v
+RagPipeline(settings, verbose=args.verbose).__init__  [pipeline.py]
+      |  create_backend(settings)      -> modeller yuklenir
+      |  VectorStore(settings.db_path) -> baglanti acilir
+      |  _check_index():
+      |      store.count() == 0             -> RuntimeError "Veritabani bos"
+      |      stored_signature != current     -> RuntimeError "farkli embedding"
+      v
+RagPipeline.answer("RAG nedir?")
+      |
+      +--(1) RETRIEVE ------------------------------------------------
+      |     retrieve(question)
+      |        backend.embed([question])[0]        -> query_vector
+      |        search(store, query_vector,
+      |               top_k=4, min_similarity=0.15)      [retrieval.py]
+      |           store.load_matrix()  -> (n, dim) numpy matrisi + kayitlar
+      |           cosine_similarity(query_vector, matrix)
+      |              her iki tarafi normalize et -> tek matris carpimi
+      |              boyut uyusmazsa ValueError
+      |           np.argsort(scores)[-k:][::-1]     -> en iyi k indeks
+      |           score >= min_similarity filtresi
+      |        -> list[SearchHit(record, score)], gecen sure
+      |
+      +--(2) ESIK KAPISI ---------------------------------------------
+      |     if not hits:
+      |         return Answer(text=NO_CONTEXT_ANSWER, hits=[],
+      |                       grounded=False)
+      |         # MODEL HIC CAGRILMAZ. Bos baglamla cagrilirsa
+      |         # kucuk model cevabi uydurur.
+      |
+      +--(3) AUGMENT -------------------------------------------------
+      |     build_messages(question, hits, language="Türkçe")  [prompts.py]
+      |        [0] system: 5 kural + dil
+      |        [1] user:   "BAĞLAM:\n[1] Kaynak: dosya | Bölüm: baslik\n..."
+      |                    "\n---\n\nSORU: RAG nedir?\n..."
+      |
+      +--(4) GENERATE ------------------------------------------------
+      |     backend.chat(messages, temperature=0.1, max_tokens=600)
+      |        FoundryBackend -> stream_chat() ciktilarini birlestirir
+      |        HashingBackend -> baglamdan cumle alintilar
+      v
+Answer(question, text, hits, retrieval_seconds, generation_seconds,
+       grounded=True)
+      |
+      v
+cmd_ask: cevabi yazdir + _print_sources(answer)
+      "Kaynaklar:
+         [1] 01-rag-nedir.md > Tanım  (benzerlik: 0.612)
+         getirme: 14 ms | uretim: 3.21 sn"
+```
+
+**Akan (streaming) varyant.** `python -m app.cli chat` içinde
+`RagPipeline.stream_answer()` kullanılır. Adım (1) ve (2) aynıdır; adım (4)
+şöyle değişir:
+
+```python
+streamer = getattr(self.backend, "stream_chat", None)
+if streamer is None:
+    yield self.backend.chat(messages, ...)   # akis desteklemeyen backend
+    return
+yield from streamer(messages, ...)
+```
+
+`stream_chat`, `Backend` sözleşmesinde zorunlu değildir. `HashingBackend` bu
+metodu tanımlamaz, bu yüzden cevabı tek parça alır. `FoundryBackend` tanımlar.
+`getattr` kontrolü sayesinde pipeline hangi durumda olduğunu bilmek zorunda değil.
+
+---
+
+## 3. Modül modül
+
+### `src/foundry_rag/config.py`
+
+Tek bir `Settings` dataclass'ı, tüm ayarlanabilir değerler. Ortam değişkenleri
+`FRAG_` önekiyle okunur.
+
+| Alan | Varsayılan | Ortam değişkeni |
+|---|---|---|
+| `docs_dir` | `<repo>/data/docs` | `FRAG_DOCS_DIR` |
+| `db_path` | `<repo>/data/rag.db` | `FRAG_DB_PATH` |
+| `chunk_size` | `900` | `FRAG_CHUNK_SIZE` |
+| `chunk_overlap` | `150` | `FRAG_CHUNK_OVERLAP` |
+| `top_k` | `4` | `FRAG_TOP_K` |
+| `min_similarity` | `0.15` | `FRAG_MIN_SIMILARITY` |
+| `backend` | `auto` | `FRAG_BACKEND` |
+| `chat_model` | `qwen2.5-0.5b` | `FRAG_CHAT_MODEL` |
+| `embedding_model` | `qwen3-embedding-0.6b` | `FRAG_EMBEDDING_MODEL` |
+| `temperature` | `0.1` | `FRAG_TEMPERATURE` |
+| `max_tokens` | `600` | `FRAG_MAX_TOKENS` |
+| `answer_language` | `Türkçe` | `FRAG_ANSWER_LANGUAGE` |
+
+Dışa açtığı iki metod:
+
+```python
+Settings.from_env() -> Settings     # ortamdan oku, yoksa varsayilani kullan
+settings.validate() -> None         # bozuk ayarda hemen ValueError
+```
+
+`validate()` beş şeyi kontrol eder: `chunk_size > 0`, `chunk_overlap >= 0`,
+`chunk_overlap < chunk_size`, `top_k > 0`, `-1 <= min_similarity <= 1`,
+`backend in {auto, foundry, hashing}`. Bunlardan en kritik olanı üçüncüsü:
+`chunk_overlap >= chunk_size` olursa parçalama ilerlemez, sonsuz döngüye girer.
+
+**Neden ayrı duruyor:** Deney yapmak tek satır değişiklik olsun diye. `top_k`
+değerini denemek için kodun içinde arama yapmak zorunda kalmazsın:
+`FRAG_TOP_K=8 python -m app.cli ask "..."`.
+
+### `src/foundry_rag/chunking.py`
+
+Saf fonksiyonlar; hiç I/O yok, hiç model yok. Bu yüzden test yazmaya buradan
+başlanır.
+
+```python
+chunk_text(text: str, chunk_size: int = 900,
+           chunk_overlap: int = 150) -> list[str]
+
+chunk_document(text: str, source: str, chunk_size: int = 900,
+               chunk_overlap: int = 150) -> list[Chunk]
+```
+
+`Chunk` donmuş (frozen) bir dataclass: `source`, `index`, `heading`, `text`.
+İki üyesi önemlidir:
+
+- `content_hash` (property): `sha256(source \x00 heading \x00 text)`. Veritabanında
+  `UNIQUE` sütun; tekrar indeksleme bu sayede idempotent olur.
+- `with_heading_prefix()`: `"heading\n\ntext"` döner. Embed edilen metin budur.
+
+Parçalama stratejisi dört aşamalıdır ve sırayla düşer:
+
+1. `_iter_sections()` Markdown başlıklarını (`^#{1,6}\s+`) izler, her parçanın
+   hangi bölümden geldiğini bilir.
+2. Paragraflar (`\n\s*\n` ile bölünmüş) `chunk_size`'ı aşana kadar birleştirilir.
+3. Tek başına `chunk_size`'dan uzun bir paragraf cümlelere bölünür
+   (`_SENTENCE_END` regex'i: `. ! ? …` sonrası boşluk).
+4. Tek başına uzun bir cümle `_hard_split()` ile karakter sayısına göre kesilir.
+
+Ardışık parçalar `_tail_overlap()` ile `chunk_overlap` karakter paylaşır ve bu
+örtüşme kelime ortasından başlamaz.
+
+**Neden ayrı duruyor:** Parçalama, RAG kalitesini en çok etkileyen ve en kolay
+test edilen parçadır. Model olmadan çalıştığı için `tests/test_chunking.py`
+saniyeler içinde koşar.
+
+### `src/foundry_rag/store.py`
+
+SQLite katmanı. Detaylı şema bölüm 5'te.
+
+```python
+encode_vector(vector: Sequence[float]) -> bytes
+decode_vector(blob: bytes) -> np.ndarray
+
+class VectorStore:
+    __init__(db_path: Path | str)
+    reset() -> None
+    add_chunks(rows: Iterable[tuple[str, int, str, str, str, Sequence[float]]]) -> int
+    set_meta(key: str, value: str) -> None
+    get_meta(key: str, default: str | None = None) -> str | None
+    count() -> int
+    sources() -> list[str]
+    load_matrix() -> tuple[np.ndarray, list[ChunkRecord]]
+    close() -> None
+```
+
+`VectorStore` bir context manager'dır (`__enter__` / `__exit__`), yani
+`with VectorStore(path) as store:` kullanımı bağlantıyı kapatmayı garanti eder.
+
+`ChunkRecord.citation` property'si `"01-rag-nedir.md > Tanım"` biçiminde kısa
+kaynak metni üretir; CLI ve Streamlit ikisi de bunu kullanır.
+
+**Neden ayrı duruyor:** `VectorStore` hiçbir modelden haberdar değildir. Yarın
+SQLite yerine başka bir depo kullanmak istersen sadece bu dosya değişir;
+`pipeline.py` aynı kalır.
+
+### `src/foundry_rag/retrieval.py`
+
+```python
+normalize(matrix: np.ndarray) -> np.ndarray
+cosine_similarity(query: Sequence[float], matrix: np.ndarray) -> np.ndarray
+search(store: VectorStore, query_vector: Sequence[float],
+       top_k: int = 4, min_similarity: float = 0.0) -> list[SearchHit]
+```
+
+`cosine_similarity` her iki tarafı L2-normalize eder, böylece kosinüs benzerliği
+bir nokta çarpımına indirgenir: `(normalize(matrix) @ q.T).ravel()`. Boyut
+uyuşmazlığında açık bir `ValueError` fırlatır ve çözümü söyler ("yeniden
+indeksle").
+
+`normalize()` sıfır satırları sıfır bırakır (`norms[norms == 0] = 1.0`) — aksi
+halde boş bir vektör NaN üretir ve sıralama sessizce bozulur.
+
+`search()` içindeki `min_similarity` filtresi projedeki en önemli tek satırlık
+karardır. Eşik olmasaydı, cevabı belgelerde bulunmayan bir soru için bile
+"en az kötü" 4 parça dönerdi ve model onlardan bir cevap uydururdu.
+
+**Neden ayrı duruyor:** Arama matematiği, depolamadan ve prompt'tan bağımsız
+olarak test edilebilir. `tests/test_retrieval.py` uydurma vektörlerle çalışır.
+
+### `src/foundry_rag/prompts.py`
+
+```python
+SYSTEM_PROMPT               # 5 kurallik sablon, {language} yer tutuculu
+NO_CONTEXT_ANSWER = "Bu bilgi elimdeki belgelerde yok."
+
+build_system_prompt(language: str = "Türkçe") -> str
+format_context(hits: Sequence[SearchHit]) -> str
+build_user_prompt(question: str, hits: Sequence[SearchHit]) -> str
+build_messages(question, hits, language="Türkçe") -> list[dict[str, str]]
+```
+
+Sistem prompt'undaki beş kural: (1) sadece bağlamı kullan, (2) yoksa
+`"Bu bilgi elimdeki belgelerde yok."` de, (3) her iddianın sonunda kaynağı köşeli
+parantezle belirt, (4) kısa yaz, (5) belirtilen dilde cevapla.
+
+`format_context()` her parçayı şöyle etiketler:
+
+```
+[1] Kaynak: 01-rag-nedir.md | Bölüm: Tanım
+<parca metni>
+
+---
+
+[2] Kaynak: 03-embedding-ve-vektor-arama.md | Bölüm: Kosinüs benzerliği
+<parca metni>
+```
+
+Kullanıcı mesajında bağlam **önce**, soru **sonra** gelir. Model önce malzemeyi
+okur, sonra ne yapması istendiğini öğrenir.
+
+**Neden ayrı duruyor:** Prompt, RAG projesinde en sık değiştirilen dosyadır.
+Ayrı durduğu için `pipeline.py`'a dokunmadan denenebilir ve
+`tests/test_prompts_and_backend.py` içinde bağımsız doğrulanır.
+
+### `src/foundry_rag/pipeline.py`
+
+İki akışın birleştiği yer.
+
+```python
+EMBED_BATCH_SIZE = 16
+TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".rst"}
+
+iter_documents(docs_dir: Path) -> Iterator[tuple[str, str]]
+ingest(settings: Settings, backend: Backend | None = None,
+       reset: bool = True, verbose: bool = True) -> IngestReport
+
+class RagPipeline:
+    __init__(settings=None, backend=None, verbose=False)
+    retrieve(question: str) -> tuple[list[SearchHit], float]
+    answer(question: str) -> Answer
+    stream_answer(question: str) -> Iterable[str]
+    close() -> None
+```
+
+`ingest()` bir fonksiyon, `RagPipeline` bir sınıftır. Bu ayrım bilinçlidir:
+indeksleme çalışır ve biter (durum tutmaz), sorgulama ise açık bir veritabanı
+bağlantısı ve yüklü modeller üzerinde tekrar tekrar çalışır (durum tutar).
+
+`Answer` dataclass'ı cevabı denetlenebilir kılar:
+
+| Alan | Ne işe yarar |
+|---|---|
+| `text` | Modelin ürettiği cevap |
+| `hits` | Cevabın dayandığı parçalar + skorları |
+| `retrieval_seconds` | Arama süresi |
+| `generation_seconds` | Üretim süresi |
+| `grounded` | `False` ise cevap bağlamdan değil, eşik kapısından geldi |
+| `sources` (property) | Tekrarsız kaynak dosya listesi, en iyi eşleşme önce |
+| `total_seconds` (property) | `retrieval_seconds + generation_seconds` |
+
+**Neden ayrı duruyor:** Bu dosya diğer tüm modülleri çağırır ama hiçbiri bunu
+çağırmaz. Bağımlılık yönü tek yönlüdür.
+
+### `app/cli.py` ve `app/streamlit_app.py`
+
+İkisi de aynı `RagPipeline`'ı kullanır; sadece render eder.
+
+CLI alt komutları ve yaptıkları:
+
+| Komut | Çağırdığı |
+|---|---|
+| `python -m app.cli ingest` | `create_backend()` + `ingest()` |
+| `python -m app.cli ask "soru"` | `RagPipeline.answer()` |
+| `python -m app.cli chat` | `RagPipeline.stream_answer()` döngüde |
+| `python -m app.cli info` | `VectorStore.count()`, `.sources()`, `.get_meta()` |
+
+Global bayraklar: `--backend {auto,foundry,hashing}`, `--top-k`,
+`--min-similarity`, `-v/--verbose`. `ingest` ayrıca `--chunk-size`,
+`--chunk-overlap`, `--append` alır.
+
+`main()` çıkış kodlarını ayırır: backend hatası `2`, diğer hatalar `1`,
+Ctrl-C `130`. Bu, `eval/evaluate.py` gibi betiklerin sorunu ayırt etmesini sağlar.
+
+Streamlit tarafında kritik satır şudur:
+
+```python
+@st.cache_resource(show_spinner=False)
+def load_pipeline(backend: str, top_k: int, min_similarity: float) -> RagPipeline:
+```
+
+Streamlit her etkileşimde tüm script'i yeniden çalıştırır. `cache_resource`
+olmasaydı her tıklamada yeni bir `RagPipeline` kurulur, bu da
+`FoundryLocalManager.initialize()`'ın ikinci kez çağrılmasına ve çökmeye yol
+açardı (bkz. bölüm 4).
+
+`app/_bootstrap.py` küçük ama gereklidir: `pip install -e .` yapılmamış bir
+klonda `src/` klasörünü `sys.path`'e ekler, böylece `python -m app.cli` doğrudan
+çalışır.
+
+---
+
+## 4. Backend soyutlaması
+
+### Sözleşme
+
+`src/foundry_rag/backends/base.py`:
+
+```python
+class Backend(ABC):
+    name: str = "base"
+
+    @abstractmethod
+    def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+    @abstractmethod
+    def chat(self, messages: Sequence[dict], temperature: float = 0.1,
+             max_tokens: int = 600) -> str: ...
+
+    @property
+    @abstractmethod
+    def embedding_dim(self) -> int: ...
+
+    def describe(self) -> str:
+        return f"{self.name} (dim={self.embedding_dim})"
+
+    def embedding_signature(self) -> str:
+        return f"{self.name}:{self.embedding_dim}"
+```
+
+Bir RAG pipeline'ının bir model sağlayıcısından ihtiyaç duyduğu her şey bu üç
+üyedir. Fazlası değil.
+
+İki istisna sınıfı vardır ve ayrımları anlamlıdır:
+
+- `BackendUnavailable` — backend hiç kurulamadı (paket yok, Python sürümü yanlış,
+  servis kapalı). `auto` modu bunu yakalayıp yedeğe geçer.
+- `BackendError` — backend var ama istek başarısız oldu.
+
+### Seçim: `create_backend()`
+
+`src/foundry_rag/backends/__init__.py`:
+
+| `settings.backend` | Davranış | Ne zaman kullanılır |
+|---|---|---|
+| `hashing` | Her zaman `HashingBackend` | Testler, Foundry Local yokken demo |
+| `foundry` | `FoundryBackend` zorunlu, olmazsa hata | Ortam kurulduktan sonra; bozuk kurulum sessizce gizlenmesin |
+| `auto` (varsayılan) | Önce Foundry, olmazsa uyarı basıp `HashingBackend` | İlk gün; model indirmesi bitmeden proje çalışsın |
+
+`FoundryBackend` **lazy import** edilir (`create_backend` fonksiyonunun içinde
+`from .foundry import FoundryBackend`). Sebebi: `hashing` yolunu seçen bir
+kullanıcı SDK'nın ağır native bağımlılıklarını hiç yüklemek zorunda kalmasın.
+
+`auto` ve `foundry` yollarında `backend.embedding_dim` bilerek erkenden okunur:
+
+```python
+def _build_foundry() -> Backend:
+    backend = FoundryBackend(...)
+    backend.embedding_dim   # gercek baslatmayi simdi tetikle
+    return backend
+```
+
+Bu satır olmasaydı, model yükleme hatası uzun bir indeksleme çalışmasının
+ortasında ortaya çıkardı.
+
+### İki uygulama arasındaki fark
+
+| | `HashingBackend` | `FoundryBackend` |
+|---|---|---|
+| `name` | `hashing-offline` | `foundry-local` |
+| Vektör boyutu | `512` (sabit, `DIM`) | Çalışma anında ölçülür; `qwen3-embedding-0.6b` için `1024` |
+| `embedding_signature()` | `hashing-offline:512` | `foundry-local:qwen3-embedding-0.6b:1024` |
+| Embedding yöntemi | Hash'lenmiş kelime + bigram + karakter 4-gram torbası | Gerçek sinir ağı, anlam uzayı |
+| Eş anlamlı / paraphrase eşleşmesi | Yok. Ortak kelime yoksa skor düşer | Var |
+| Chat | Dil modeli yok; bağlamdaki en yakın 3 cümleyi **alıntılar** | Gerçek üretim, `complete_streaming_chat` |
+| `stream_chat` | Yok | Var |
+| Bağımlılık | stdlib + numpy | `foundry-local-sdk >= 1.2`, Python >= 3.11, arm64 macOS |
+| İlk çalıştırma maliyeti | 0 | ~1.3 GB model indirmesi |
+| Determinizm | Tam. Aynı girdi hep aynı vektör | Hayır |
+
+`HashingBackend` determinizmi bir tesadüf değil, bilinçli bir seçimdir.
+`_bucket()` fonksiyonu Python'un yerleşik `hash()`'ini değil `blake2b`'yi kullanır:
+
+```python
+def _bucket(feature: str) -> int:
+    digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=4).digest()
+    return int.from_bytes(digest, "big") % DIM
+```
+
+Python 3'te `hash()` süreç başına rastgeleleştirilir; onunla üretilen vektörler
+iki farklı çalıştırmada farklı olurdu ve indeks bir sonraki çalıştırmada
+kullanılamaz hale gelirdi.
+
+`HashingBackend.chat()` bir dil modeli değildir. Kendisine verilen prompt'u
+tersine ayrıştırır (`_split_prompt()` ile `SORU:` ve `BAĞLAM:` bloklarını
+çıkarır), her bağlam cümlesini soruyla skorlar, en iyi 3'ünü kaynak etiketiyle
+döndürür ve cevabın sonuna bunun bir dil modeli tarafından yazılmadığını
+belirten bir not ekler. Öğrenci böylece hangi yarının çalıştığını karıştırmaz.
+
+### Neden testler `HashingBackend` kullanıyor
+
+`tests/conftest.py` dosyasının başındaki yorum sebebi açıkça söyler: testler
+hızlı, çevrimdışı ve deterministik olmalıdır. CI ortamında gigabaytlarca model
+indirmek bunların hiçbiri değildir.
+
+Somut olarak, 67 testin tamamı `HashingBackend` ile koşar. `conftest.py` şu üç
+fixture'ı verir:
+
+```python
+@pytest.fixture
+def backend() -> HashingBackend: ...
+
+@pytest.fixture
+def docs_dir(tmp_path: Path) -> Path:      # kediler.md + kahve.md
+    ...
+
+@pytest.fixture
+def settings(tmp_path, docs_dir) -> Settings:
+    return Settings(docs_dir=docs_dir, db_path=tmp_path / "test.db",
+                    chunk_size=300, chunk_overlap=50, top_k=3,
+                    min_similarity=0.0, backend="hashing")
+```
+
+Her test kendi `tmp_path` veritabanını kullanır; testler birbirini kirletmez.
+
+Aynı backend `eval/evaluate.py` için de bir taban çizgisi görevi görür. Ölçülen
+değerler (`top_k=4`, `min_similarity=0.15`, 33 soruluk set):
+
+| Metrik | HashingBackend |
+|---|---|
+| Recall@4 | %72.0 |
+| MRR | 0.650 |
+| Reddetme doğruluğu | %87.5 |
+| Genel doğruluk | %75.8 |
+
+Bu sonuç bilerek vasattır. `python eval/evaluate.py --backend hashing` ile bu
+taban çizgisini, `python eval/evaluate.py` ile gerçek embedding modelinin
+sonucunu alıp farkı görürsün. Soyutlamanın öğretim değeri budur: aynı pipeline,
+değişen tek şey model.
+
+---
+
+## 5. Veri modeli
+
+Tüm veri tek bir SQLite dosyasında durur: varsayılan olarak `data/rag.db`.
+
+### `chunks` tablosu
+
+`src/foundry_rag/store.py` içindeki `SCHEMA` sabitinden birebir:
+
+```sql
+CREATE TABLE IF NOT EXISTS chunks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT    NOT NULL,
+    chunk_index   INTEGER NOT NULL,
+    heading       TEXT    NOT NULL DEFAULT '',
+    content       TEXT    NOT NULL,
+    content_hash  TEXT    NOT NULL UNIQUE,
+    embedding     BLOB    NOT NULL,
+    dim           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+```
+
+| Sütun | Neden var |
+|---|---|
+| `id` | `load_matrix()` satırları `ORDER BY id` çeker; matris satırı ile kayıt listesi indeksi böylece hizalı kalır |
+| `source` | Kaynak gösterimi (`[01-rag-nedir.md]`) ve `sources()` sorgusu |
+| `chunk_index` | Parçanın belge içindeki sırası; hata ayıklarken "kaçıncı parça" sorusunu cevaplar |
+| `heading` | `ChunkRecord.citation` ve prompt'taki `Bölüm:` etiketi |
+| `content` | Prompt'a giren metin. Başlık öneki içermez (o sadece embed'e girer) |
+| `content_hash` | `UNIQUE`. `INSERT OR IGNORE` ile birlikte tekrar indekslemeyi idempotent yapar |
+| `embedding` | `float32` ham baytlar (bölüm 6) |
+| `dim` | Yazılırken `len(vec)` olarak kaydedilir; okurken bütünlük kontrolü için kullanılır |
+
+`idx_chunks_source` indeksi `sources()` ve kaynağa göre filtreleme içindir.
+`embedding` sütununda indeks **yoktur** ve olamaz — kosinüs benzerliği B-tree ile
+aranamaz, bu yüzden arama kaba kuvvettir.
+
+`dim` sütunu tek başına bir sayıdan fazlasıdır. `load_matrix()` şunu yapar:
+
+```python
+dims = {int(r["dim"]) for r in rows}
+if len(dims) != 1:
+    raise ValueError(
+        f"Corrupt index: mixed embedding dimensions {sorted(dims)}. "
+        "Re-run ingestion to rebuild the database."
+    )
+```
+
+Karışık boyutlu satırlar `np.vstack` sırasında anlaşılmaz bir numpy hatası
+verirdi. Bu kontrol, hatayı kullanıcının anlayacağı bir cümleye çevirir.
+
+### `index_meta` tablosu
+
+```sql
+CREATE TABLE IF NOT EXISTS index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+```
+
+Basit anahtar-değer tablosu. `ingest()` sonunda beş satır yazılır
+(`pipeline.py` içindeki sabitler):
+
+| Anahtar | Sabit | Örnek değer |
+|---|---|---|
+| `embedding_signature` | `META_SIGNATURE` | `foundry-local:qwen3-embedding-0.6b:1024` |
+| `chunk_size` | `META_CHUNK_SIZE` | `900` |
+| `chunk_overlap` | `META_CHUNK_OVERLAP` | `150` |
+| `backend` | `META_BACKEND` | `foundry-local` |
+| `document_count` | `META_DOC_COUNT` | `8` |
+
+Hepsini görmek için: `python -m app.cli info`.
+
+`set_meta()` `INSERT ... ON CONFLICT(key) DO UPDATE` kullanır, yani yeniden
+indeksleme değerleri günceller, çoğaltmaz.
+
+### `embedding_signature` neden saklanıyor
+
+Bu, projedeki en sinsi hatayı engelleyen mekanizmadır.
+
+Senaryo: Öğrenci `--backend hashing` ile indeksliyor (512 boyutlu vektörler).
+Ertesi gün Foundry Local'i kuruyor ve `python -m app.cli ask "..."` çalıştırıyor.
+Artık sorgu vektörü 1024 boyutlu, indekstekiler 512 boyutlu.
+
+Bu koruma olmasaydı iki kötü sonuçtan biri olurdu:
+
+1. Boyutlar farklıysa numpy anlaşılmaz bir shape hatası verir.
+2. Boyutlar tesadüfen aynı olsaydı (iki farklı 1024 boyutlu model) hiçbir hata
+   olmaz, sadece **benzerlik skorları anlamsız** olurdu. Sistem çalışıyor gibi
+   görünüp yanlış parçalar getirirdi. Bu, sessiz bozulmadır ve en kötü hata
+   türüdür.
+
+`RagPipeline._check_index()` bunu açılışta yakalar:
+
+```python
+stored = self.store.get_meta(META_SIGNATURE)
+current = self.backend.embedding_signature()
+if stored and stored != current:
+    raise RuntimeError(
+        "Indeks farkli bir embedding modeliyle olusturulmus.\n"
+        f"  indekste: {stored}\n"
+        f"  simdiki : {current}\n"
+        "Vektor uzaylari uyumsuz. Yeniden indeksle:\n"
+        "  python -m app.cli ingest"
+    )
+```
+
+İki savunma katmanı daha vardır: `cosine_similarity()` boyut uyuşmazlığında
+`ValueError` fırlatır, `load_matrix()` karışık `dim` değerlerinde `ValueError`
+fırlatır. Üçü birlikte "yanlış vektör uzayı" hatasının sessizce geçmesini
+imkânsız kılar.
+
+---
+
+## 6. Vektörlerin `float32` BLOB olarak saklanması
+
+### Karar
+
+```python
+VECTOR_DTYPE = np.float32
+
+def encode_vector(vector: Sequence[float]) -> bytes:
+    return np.asarray(vector, dtype=VECTOR_DTYPE).tobytes()
+
+def decode_vector(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=VECTOR_DTYPE)
+```
+
+Vektör, SQLite'a `BLOB` sütununda ham `float32` baytları olarak yazılır.
+Alternatif, listeyi `json.dumps()` ile `TEXT` sütununa yazmaktı.
+
+### Boyut karşılaştırması
+
+Bu projedeki iki gerçek boyut için ölçüldü:
+
+| Vektör boyutu | `float32` BLOB | JSON metin | Oran |
+|---|---|---|---|
+| 512 (`HashingBackend`) | 2.048 bayt | 10.629 bayt | 5,2x |
+| 1024 (`qwen3-embedding-0.6b`) | 4.096 bayt | 21.275 bayt | 5,2x |
+
+BLOB boyutu tam olarak hesaplanabilir: `boyut x 4 bayt`. 1024 x 4 = 4096.
+
+Kendin doğrulamak istersen:
+
+```python
+import array, json, random
+v = [random.uniform(-1, 1) for _ in range(1024)]
+len(array.array('f', v).tobytes())   # 4096
+len(json.dumps(v))                   # ~21000
+```
+
+### Hız karşılaştırması
+
+JSON yolu her satır için şunu gerektirir: metin çöz (`json.loads`) -> Python
+`float` listesi kur -> `np.asarray` ile numpy'a çevir. Üç adım, hepsi Python
+seviyesinde, satır başına.
+
+BLOB yolu tek adımdır: `np.frombuffer(blob, dtype=np.float32)`. Bu fonksiyon
+veriyi kopyalamaz bile, mevcut bayt tamponunun üstüne bir numpy görünümü açar.
+`load_matrix()` sonra tek `np.vstack` ile hepsini `(n, dim)` matrise yığar ve
+arama tek bir matris çarpımına indirgenir.
+
+### Tek tehlike: dtype tutarlılığı
+
+`store.py`'ın en başındaki uyarı bunu söyler: yazarken ve okurken **aynı** dtype
+kullanılmalıdır. `float32` yazıp `float64` okursan hata almazsın — `frombuffer`
+baytları sessizce yanlış yorumlar ve tamamen çöp sayılar döner. Bu yüzden dtype
+tek bir yerde, `VECTOR_DTYPE` sabitinde tanımlıdır ve iki fonksiyon da onu
+kullanır.
+
+`float32` seçilme sebebi: embedding modellerinin ürettiği hassasiyet zaten
+`float32` düzeyindedir. `float64`'e yükseltmek dosyayı iki katına çıkarır,
+kosinüs benzerliği sonucunu ise ölçülebilir biçimde değiştirmez.
+
+---
+
+## 7. Tasarım kararları ve gerekçeleri
+
+| Karar | Alternatif | Neden bu seçildi |
+|---|---|---|
+| SQLite + numpy kaba kuvvet arama | `sqlite-vec`, FAISS, Chroma, Qdrant | macOS sistem Python'unda `enable_load_extension` yok, `sqlite-vec` kurulamıyor. Ayrıca bu ölçekte (yüzler-binler) tek matris çarpımı milisaniyeler sürüyor ve sıfır ek bağımlılık gerektiriyor |
+| Vektörler `float32` BLOB | JSON `TEXT` sütunu | 5,2x daha küçük; okuma tek `np.frombuffer` çağrısı, kopyalama yok |
+| `Backend` ABC + iki uygulama | `FoundryBackend`'i doğrudan `pipeline.py`'dan çağırmak | Testler çevrimdışı, hızlı ve deterministik koşuyor; öğrenci ilk gün model indirmeden projeyi uçtan uca çalıştırabiliyor |
+| `create_backend()`'de lazy import | Modül başında `from .foundry import ...` | `hashing` yolunu kullanan kimse ağır native SDK bağımlılığını yüklemek zorunda kalmıyor |
+| `auto` varsayılan backend | Sadece `foundry` | İlk çalıştırmada Foundry Local hazır değilse proje çökmek yerine görünür bir uyarıyla yedeğe geçiyor |
+| `foundry` modu sert başarısız oluyor | Her zaman sessizce yedeğe geçmek | Ortam kurulduktan sonra bozuk bir kurulumun sessizce yavaş/yanlış çalışması, hata vermesinden daha kötü |
+| `ingest(reset=True)` varsayılan | Artımlı güncelleme | Silinen veya düzenlenen bir belgenin bayat parçalarını geride bırakmayan tek strateji bu; bu korpus boyutunda yeniden kurmak zaten ucuz |
+| `content_hash` `UNIQUE` + `INSERT OR IGNORE` | Her seferinde koşulsuz `INSERT` | `--append` ile tekrar indeksleme kopya satır üretmiyor |
+| `min_similarity = 0.15` eşiği | Her zaman `top_k` parça döndürmek | Eşik olmadan cevabı belgelerde olmayan soru için "en az kötü" parçalar döner ve model onlardan cevap uydurur |
+| `hits` boşken model **hiç** çağrılmıyor | Boş bağlamla modeli çağırıp "bilmiyorum" demesini ummak | `qwen2.5-0.5b` gibi küçük bir model boş bağlamda kuralı unutup uyduruyor. Ayrıca gereksiz saniyeler harcanmıyor |
+| `embedding_signature` meta satırı | Hiçbir şey saklamamak | Vektör uzayı değiştiğinde sistem sessizce yanlış sonuç üretmek yerine açık hata veriyor (bölüm 5) |
+| Embed'e başlık öneki (`with_heading_prefix()`) | Ham parça metnini embed etmek | Belgeden koparılmış parça hangi bölüme ait olduğunu kaybediyor; başlık öneki yapılandırılmış belgelerde eşleşmeyi iyileştiriyor |
+| `embedding_dim` çalışma anında ölçülüyor | Kodda `1024` sabiti | Boyut modelin özelliği, her alias için belgelenmiş değil ve model değişince sabit sessizce yanlışa dönüşür |
+| Streaming döngüsünde `if not chunk.choices: continue` | Microsoft'un tutorial kodundaki korumasız indeksleme | Son chunk boş `choices` ile gelebiliyor ve tutorial kodu cevabı yazdırdıktan hemen sonra `IndexError` ile çöküyor (Foundry-Local issue #905, açık) |
+| `if FoundryLocalManager.instance is None` kontrolü | Doğrudan `initialize()` çağırmak | Manager bir singleton; ikinci `initialize()` hata veriyor. Streamlit her etkileşimde script'i yeniden çalıştırdığı, `uvicorn --reload` ve notebook hücreleri de tekrar çalıştırdığı için bu kontrol olmadan çöküyor |
+| `download_and_register_eps()` hatası ölümcül değil | Hata fırlatmak | macOS'ta hızlandırma WebGPU (Dawn -> Metal) üzerinden gidiyor ve bu çağrı no-op olabiliyor; başarısızlığı çalışmayı engellememeli |
+| `load()` sonrası model id + execution provider yazdırılıyor (`describe_variant()`) | Sessizce devam etmek | GPU EP doğru kaydolsa bile bazen sadece CPU varyantı seçilebiliyor (issue #858 / #895); yavaş build'de çalıştığını fark etmenin tek yolu bunu yazdırmak |
+| `stream_chat` isteğe bağlı, `getattr` ile yoklanıyor | ABC'ye zorunlu metod eklemek | `HashingBackend`'in akıtacak bir şeyi yok; sözleşmeyi minimum tutmak yeni backend yazmayı kolaylaştırıyor |
+| Tüm ayarlar tek `Settings` dataclass'ında + `FRAG_*` ortam değişkenleri | Sabitleri modüllere dağıtmak | Deney tek satır: `FRAG_TOP_K=8 python -m app.cli ask "..."` |
+| `settings.validate()` her akışın başında | Değerleri kullanıldıkları yerde kontrol etmek | `chunk_overlap >= chunk_size` gibi bir hata parçalamanın ortasında değil, hiçbir şey yazılmadan önce yakalanıyor |
+| `temperature = 0.1` | Model varsayılanı (daha yüksek) | Bağlama dayalı cevapta yaratıcılık istenmiyor; düşük sıcaklık kuralları takip etmeyi ve alıntı formatını korumayı artırıyor |
+| Streamlit'te `@st.cache_resource` | Her yeniden çalıştırmada yeni pipeline | Model yükleme maliyetinden bağımsız olarak, singleton manager ikinci kez kurulamaz |
+| `_bootstrap.py` ile `sys.path`'e `src/` ekleme | `pip install -e .` zorunlu tutmak | Depoyu yeni klonlayan öğrenci `python -m app.cli` komutunu hemen çalıştırabiliyor |
+
+---
+
+## 8. Bilinçli sınırlar
+
+Aşağıdakiler eksiklik değil, kapsam dışı bırakılmış şeylerdir. Her biri neyin
+ne zaman değişmesi gerektiğini söyler.
+
+### Kaba kuvvet arama ~100 bin parçaya kadar
+
+`store.load_matrix()` her sorguda **tüm** vektörleri belleğe yükler. Docstring
+bunu açıkça sınırlar: "Loading everything into memory is deliberate ... Revisit
+only past ~100k chunks."
+
+Somut hesap: 1024 boyutlu `float32` vektör = 4.096 bayt. 100.000 parça =
+yaklaşık 410 MB matris. Bunun üstünde:
+
+- Bellek kullanımı rahatsız edici olur.
+- Her sorguda tüm matrisi diskten okumak, arama süresini LLM çağrısına kıyasla
+  önemsiz olmaktan çıkarır.
+
+Bu sınıra yaklaşırsan yapılacak şey `retrieval.py`'ı bir ANN indeksiyle
+(FAISS, hnswlib) değiştirmektir. `search()` imzası aynı kalabilir, çünkü arayüz
+zaten `store` ve `query_vector` alıp `list[SearchHit]` döndürüyor.
+
+### Tek kullanıcı, tek süreç
+
+`VectorStore.__init__` tek bir `sqlite3.connect()` bağlantısı açar ve bu bağlantı
+`RagPipeline` ömrü boyunca yaşar. Proje şunları varsaymaz ve desteklemez:
+
+- Aynı veritabanına eşzamanlı yazan birden fazla süreç
+- Kullanıcı hesapları, oturum yönetimi, yetkilendirme
+- Ağ üzerinden paylaşılan indeks
+
+Streamlit arayüzü tarayıcıda çalışsa da tek bir yerel süreçtir. Birden fazla
+kişi aynı anda kullanırsa `st.cache_resource` ile paylaşılan tek bir pipeline'ı
+paylaşırlar; bu proje bunun için tasarlanmadı.
+
+### Çok turlu sohbet geçmişi yok
+
+`build_messages()` tam olarak iki mesaj döndürür:
+
+```python
+[
+    {"role": "system", "content": build_system_prompt(language)},
+    {"role": "user",   "content": build_user_prompt(question, hits)},
+]
+```
+
+Önceki soru ve cevaplar modele hiç gönderilmez. Sonucu:
+
+- "Peki onun avantajı ne?" gibi bir takip sorusu çalışmaz. "Onun" neye
+  gönderdiğini model bilmez.
+- Her soru bağımsız olarak embed edilir ve bağımsız olarak aranır.
+
+`app/cli.py chat` komutundaki döngü ve Streamlit'teki `st.session_state.history`
+sadece **ekranda** geçmiş gösterir; modele gitmez.
+
+Bunu eklemek isteyen için doğru yer `prompts.py`'daki `build_messages()`'tır ve
+dikkat edilecek nokta şudur: geçmiş mesajlar bağlam penceresini yer, `top_k`
+parça için kalan yeri azaltır. Küçük modellerde bu takas hızla zarara döner.
+
+### Diğer bilinçli kapsam dışılıklar
+
+| Yok olan | Sonucu | Nerede eklenirdi |
+|---|---|---|
+| Yeniden sıralama (reranker) | `top_k` parça sadece kosinüs skoruna göre seçilir | `retrieval.py`, `search()` sonrası |
+| Hibrit arama (BM25 + vektör) | Tam kelime eşleşmeleri ekstra ağırlık almaz | `retrieval.py` |
+| Artımlı indeksleme | Bir belge değişince tüm indeks yeniden kurulur | `pipeline.py`, `ingest()` |
+| PDF / DOCX / HTML okuma | Sadece `.md`, `.markdown`, `.txt`, `.rst` (`TEXT_SUFFIXES`) | `pipeline.py`, `iter_documents()` |
+| Sorgu genişletme / yeniden yazma | Kötü ifade edilmiş soru kötü sonuç verir | `pipeline.py`, `retrieve()` |
+| Cevap önbelleği | Aynı soru iki kez sorulursa iki kez üretilir | `pipeline.py`, `answer()` |
+| İndeks bütünlük doğrulaması | Bozuk model önbelleği tespit edilmez (Foundry-Local issue #909 / #906, açık) | `scripts/doctor.py` |
+
+### "Çevrimdışı" ne zaman geçerli
+
+Proje çevrimdışı çalışır, ama **ilk çalıştırmadan sonra**. İlk `ingest`
+sırasında model kataloğu ve model dosyaları ağdan çekilir. `HashingBackend` ise
+ilk andan itibaren ağ kullanmaz — bu yüzden testler ve `--backend hashing` yolu
+tamamen çevrimdışıdır.
+
+---
+
+## Kontrol listesi: mimariyi anladın mı
+
+Aşağıdakileri kodun içinde bulabiliyorsan bu belgeyi işlevsel olarak okumuşsundur.
+
+- [ ] `ingest()` ile `RagPipeline`'ın biri fonksiyon biri sınıf — sebebini
+      söyleyebiliyor musun?
+- [ ] `backend.embed()`'e giden metinle `chunks.content` sütununa yazılan metnin
+      neden farklı olduğunu gösterebiliyor musun?
+- [ ] `hits` boşken hangi satırın modeli çağırmayı engellediğini
+      `pipeline.py`'da bulabiliyor musun?
+- [ ] `embedding_signature` uyuşmazlığını üreten senaryoyu iki komutla
+      canlandırabiliyor musun? (`--backend hashing` ile indeksle, `--backend
+      foundry` ile sor)
+- [ ] `python -m app.cli info` çıktısındaki beş meta satırının hangi kod
+      satırında yazıldığını gösterebiliyor musun?
+- [ ] `store.py` içinde neden hiç `backend` kelimesi, `backends/` içinde neden
+      hiç `sqlite3` geçmediğini açıklayabiliyor musun?
+- [ ] `np.frombuffer(blob, dtype=np.float64)` yazarsan ne olacağını
+      söyleyebiliyor musun?
+
+Doğrulamak için:
+
+```bash
+python -m app.cli --backend hashing ingest
+python -m app.cli info
+python -m pytest tests/ -q
+python eval/evaluate.py --backend hashing
+```

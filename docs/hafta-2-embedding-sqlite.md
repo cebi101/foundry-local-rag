@@ -1,0 +1,873 @@
+# Hafta 2 -- Embedding, Vektör Arama ve SQLite
+
+**Faz 1: Temel Öğrenme**
+
+Bu hafta RAG boru hattının "getirme" (retrieval) yarısını sökeceğiz. Dil modeline
+hiç dokunmuyoruz. Haftanın sonunda şu üç sorunun cevabını kodun içinden
+gösterebiliyor olman gerekiyor:
+
+1. Bir metin nasıl sayı dizisine dönüşüyor?
+2. İki sayı dizisinin "benzer" olduğuna nasıl karar veriliyor?
+3. Bu diziler diske nasıl yazılıyor ve neden JSON değil de BLOB?
+
+---
+
+## Bu haftada dokunacağın dosyalar
+
+| Dosya | Ne var içinde |
+|---|---|
+| `src/foundry_rag/retrieval.py` | `normalize()`, `cosine_similarity()`, `search()`, `SearchHit` |
+| `src/foundry_rag/store.py` | `SCHEMA`, `encode_vector()`, `decode_vector()`, `VectorStore` |
+| `src/foundry_rag/backends/base.py` | `Backend` sözleşmesi: `embed()`, `embedding_dim`, `embedding_signature()` |
+| `src/foundry_rag/backends/hashing.py` | `DIM = 512`, `embed_one()` -- çevrimdışı yedek embedder |
+| `src/foundry_rag/config.py` | `Settings.top_k = 4`, `Settings.min_similarity = 0.15` |
+| `tests/test_retrieval.py` | 14 test |
+| `tests/test_store.py` | 10 test |
+| `data/docs/03-embedding-ve-vektor-arama.md` | Aynı konunun Türkçe ders notu (bilgi tabanında da var) |
+| `data/docs/04-sqlite-ile-yerel-depolama.md` | SQLite ders notu |
+
+## Ön koşullar
+
+Alıştırmalara başlamadan önce bu üç komut hatasız çalışmalı:
+
+```bash
+cd ~/Desktop/foundry-local-rag
+python --version          # 3.11 veya üstü olmalı (venv icinde)
+python -m pytest tests/ -q
+python -m app.cli info
+```
+
+`python --version` 3.9.6 diyorsa venv'i aktive etmemişsin demektir. Sistem
+Python'u ile devam edersen bu haftanın alıştırmaları yine de çalışır (numpy ve
+sqlite3 yeterli), ama Hafta 3'te Foundry Local SDK'sı kurulmayacak.
+
+> **Tek satırlık `python -c` komutları için not:** paket `src/` altında ve
+> `pip install -e .` yapmadıysan import başarısız olur. Bu dokümandaki tüm
+> `python -c` komutları `PYTHONPATH=src` ön ekiyle yazıldı; repo kökünden
+> çalıştır. `pytest` ve `python -m app.cli` bu ön eke ihtiyaç duymaz --
+> ilki `pyproject.toml` içindeki `pythonpath = ["src"]` ayarını, ikincisi
+> `app/_bootstrap.py`'yi kullanır.
+
+---
+
+## 1. Embedding nedir
+
+Embedding, bir metni sabit uzunlukta bir gerçel sayı vektörüne çeviren
+fonksiyondur. "Sabit uzunluk" kısmı önemli: 5 kelimelik bir cümle de, 800
+karakterlik bir paragraf da aynı boyutta vektör üretir. Bu sayede hepsini tek bir
+matriste toplayabiliyoruz.
+
+Projedeki sözleşme `src/foundry_rag/backends/base.py` içinde:
+
+```python
+@abstractmethod
+def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    """Return one embedding vector per input text, in the same order."""
+```
+
+İki farklı uygulaması var:
+
+| Backend | `name` | Boyut | Nasıl çalışıyor |
+|---|---|---|---|
+| `HashingBackend` | `hashing-offline` | 512 (`hashing.py` içinde `DIM = 512`) | Kelime + kelime ikilisi + karakter 4-gram'larını blake2b ile 512 kovaya dağıtır |
+| `FoundryBackend` | `foundry-local` | 1024 | `qwen3-embedding-0.6b` modelini yerelde çalıştırır |
+
+`HashingBackend` **anlamsal değildir**. Ortak kelime ve karakter dizisi arar.
+"otomobil" ile "araba" arasında hiçbir benzerlik göremez. Bu kasıtlı: testler
+çevrimdışı, hızlı ve deterministik çalışsın diye var. Hafta 3'te gerçek modeli
+takınca ölçtüğün skorların ne kadar arttığını göreceksin.
+
+### Boyut asla sabit yazılmaz
+
+`FoundryBackend.embedding_dim` (bkz. `backends/foundry.py`) boyutu tahmin etmiyor,
+ölçüyor:
+
+```python
+@property
+def embedding_dim(self) -> int:
+    if self._dim is None:
+        self._dim = len(self.embed(["boyut olcumu"])[0])
+    return self._dim
+```
+
+Sebep: boyut modelin bir özelliği, senin kodunun değil. Modeli değiştirdiğinde
+sabit yazılmış bir `1024` sessizce yanlış hale gelir.
+
+### Neye embedding uygulanıyor
+
+Ham parça metnine değil. `chunking.py` içindeki `Chunk.with_heading_prefix()`
+başlığı metnin önüne ekliyor:
+
+```python
+def with_heading_prefix(self) -> str:
+    if self.heading:
+        return f"{self.heading}\n\n{self.text}"
+    return self.text
+```
+
+`pipeline.ingest()` de embedding'i tam olarak bunun üzerinden alıyor
+(`backend.embed([c.with_heading_prefix() for c in batch])`). Bir paragrafı
+belgesinden koparınca hangi bölümden geldiği bilgisi kaybolur; başlığı eklemek
+onu geri kazandırır.
+
+---
+
+## 2. Kosinüs benzerliği
+
+İki vektörün benzerliğini ölçmenin en yaygın yolu aralarındaki açının kosinüsü:
+
+```
+                a · b            Σ aᵢbᵢ
+cos(a, b) = ───────────── = ────────────────────
+             ‖a‖ · ‖b‖      √(Σ aᵢ²) · √(Σ bᵢ²)
+```
+
+Sonuç `[-1, +1]` aralığındadır:
+
+| Değer | Anlamı |
+|---|---|
+| `+1` | Aynı yön (aynı ya da ölçeklenmiş vektör) |
+| `0` | Dik -- ortak hiçbir şey yok |
+| `-1` | Tam zıt yön |
+
+### Neden uzunluk değil de yön?
+
+Vektörün uzunluğu (normu) metnin **ne kadar** olduğunu taşır: tekrar eden
+kelimeler, uzun paragraflar normu büyütür. Yönü ise **ne hakkında** olduğunu
+taşır. Uzun bir belge kısa bir soruyla sırf uzun olduğu için daha yüksek skor
+almamalı. Kosinüs, normu bölerek uzunluk etkisini tamamen atar.
+
+`tests/test_retrieval.py` bunu doğrudan test ediyor:
+
+```python
+def test_magnitude_does_not_change_cosine():
+    matrix = np.array([[1.0, 1.0], [100.0, 100.0]], dtype=np.float32)
+    scores = cosine_similarity([1.0, 1.0], matrix)
+    assert scores[0] == pytest.approx(scores[1], abs=1e-6)
+```
+
+`[1, 1]` ile `[100, 100]` aynı yönü gösterir; ikisi de skor `1.0` alır.
+
+### Normalize edince kosinüs, nokta çarpımına iner
+
+Eğer `‖a‖ = ‖b‖ = 1` ise payda `1` olur ve formül `cos(a, b) = a · b` haline
+gelir. `retrieval.py` tam olarak bunu yapıyor:
+
+```python
+def normalize(matrix: np.ndarray) -> np.ndarray:
+    """L2-normalise rows. Zero rows stay zero instead of becoming NaN."""
+    matrix = np.asarray(matrix, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+```
+
+```python
+return (normalize(matrix) @ q.T).ravel()
+```
+
+Kazanç şu: `n` parça için `n` tane ayrı bölme yapmak yerine tek bir matris
+çarpımı kalıyor. Bu, numpy'nin BLAS'a devrettiği tek bir çağrı.
+
+`norms[norms == 0] = 1.0` satırına dikkat et. Sıfır vektörün normu sıfırdır;
+sıfıra bölme `nan` üretir ve `nan` her karşılaştırmada `False` döner, yani
+sıralama sessizce bozulur. Burada sıfır satır sıfır kalıyor, skoru da `0.0`
+oluyor. Testi: `test_zero_vector_does_not_produce_nan`.
+
+### Boyut uyuşmazlığı sessizce geçmez
+
+```python
+if q.shape[1] != matrix.shape[1]:
+    raise ValueError(
+        f"Dimension mismatch: query has {q.shape[1]} dims but the index has "
+        f"{matrix.shape[1]}. ..."
+    )
+```
+
+512 boyutlu bir soru vektörünü 1024 boyutlu bir indekste aramak anlamsızdır. Bu
+kontrol olmasaydı numpy zaten hata verirdi, ama mesajı öğrenciye hiçbir şey
+anlatmazdı.
+
+---
+
+## 3. Top-K seçimi ve benzerlik eşiği
+
+`search()` iki parametre alıyor (`retrieval.py`):
+
+```python
+def search(store, query_vector, top_k: int = 4, min_similarity: float = 0.0) -> list[SearchHit]:
+```
+
+Uygulamada kullanılan gerçek değerler `config.py` içindeki `Settings`'ten gelir:
+
+| Ayar | Varsayılan | Ortam değişkeni |
+|---|---|---|
+| `top_k` | `4` | `FRAG_TOP_K` |
+| `min_similarity` | `0.15` | `FRAG_MIN_SIMILARITY` |
+
+### Top-K
+
+```python
+k = min(top_k, len(records))
+top_idx = np.argsort(scores)[-k:][::-1]
+```
+
+`np.argsort` artan sıralar; son `k` elemanı almak en yüksek `k` skoru verir,
+`[::-1]` de azalan sıraya çevirir. `min(top_k, len(records))` sayesinde `top_k`
+korpustan büyük olduğunda hata çıkmaz -- `test_top_k_larger_than_corpus` bunu
+kontrol ediyor.
+
+`top_k` neden 4? Fazla parça = daha uzun prompt = daha yavaş üretim ve modelin
+dikkatinin dağılması. Az parça = doğru cevap bağlamda hiç olmayabilir. 4, bu
+projede ölçülmüş bir uzlaşma noktası.
+
+### Eşik: "bilmiyorum" diyebilmenin tek mekanizması
+
+```python
+return [
+    SearchHit(record=records[i], score=float(scores[i]))
+    for i in top_idx
+    if scores[i] >= min_similarity
+]
+```
+
+Eşik olmasaydı, cevabı korpusta olmayan bir soru bile "en az kötü" 4 parçayı geri
+getirirdi ve model bunlardan uydurma bir cevap üretirdi. `pipeline.py` bu durumu
+şöyle yakalıyor:
+
+```python
+hits, retrieval_seconds = self.retrieve(question)
+if not hits:
+    return Answer(..., text=NO_CONTEXT_ANSWER, hits=[], grounded=False)
+```
+
+Hiç parça eşiği geçemediyse dil modeli **hiç çağrılmıyor**.
+
+### Ölçülmüş taban çizgisi
+
+`HashingBackend`, `top_k=4`, `min_similarity=0.15` ile `eval/evaluate.py`
+sonuçları:
+
+| Metrik | Değer |
+|---|---|
+| Recall@4 | %72.0 |
+| MRR | 0.650 |
+| Reddetme doğruluğu | %87.5 |
+| Genel doğruluk | %75.8 |
+
+Bu rakamlar kasıtlı olarak vasat. Gerçek embedding modeliyle karşılaştıracağın
+referans çizgisi bunlar. Şimdi not al, Hafta 3'te aynı komutu tekrar
+çalıştıracaksın.
+
+---
+
+## 4. Neden SQLite
+
+`store.py` dosyasının başındaki tasarım notları bu kararı zaten anlatıyor. Özet:
+
+- **Tek dosya, sıfır kurulum.** `data/rag.db` kopyalanabilir, silinebilir,
+  `.gitignore`'a eklenebilir. Ayrı bir sunucu süreci yok. Projenin "çevrimdışı
+  çalışır" iddiası bir vektör veritabanı sunucusu gerektirseydi çökerdi.
+- **Standart kütüphanede var.** `import sqlite3` -- ek bağımlılık yok.
+- **İşlem (transaction) desteği.** `add_chunks()` tüm parçaları tek
+  `executemany` + tek `commit` ile yazıyor; yarım kalmış bir indeksleme diske
+  yarım veri bırakmıyor.
+
+### sqlite-vec neden yok
+
+sqlite-vec gibi vektör eklentileri `conn.enable_load_extension(True)` gerektirir.
+macOS'un sistem Python'unda (3.9.6) bu metot **derlenmiş değildir**, çağırırsan
+`AttributeError` alırsın. Kendin doğrula:
+
+```bash
+/usr/bin/python3 -c "import sqlite3; print(hasattr(sqlite3.connect(':memory:'), 'enable_load_extension'))"
+```
+
+Sorun değil, çünkü arama zaten numpy ile kaba kuvvet yapılıyor. `load_matrix()`
+tüm vektörleri belleğe alıyor:
+
+```python
+def load_matrix(self) -> tuple[np.ndarray, list[ChunkRecord]]:
+    """Loading everything into memory is deliberate: for a few thousand chunks
+    this costs a few megabytes and turns retrieval into a single matrix
+    multiply. Revisit only past ~100k chunks."""
+```
+
+Şu anki indeks 54 parça (`python -m app.cli info` ile gör). 1024 boyutta 54
+vektör = 54 × 1024 × 4 bayt ≈ 221 KB. Bunun için ANN indeksi kurmak, LLM
+çağrısının yanında ölçülemeyecek bir kazanç için karmaşıklık eklemek olurdu.
+
+### Şema
+
+`store.py` içindeki `SCHEMA` sabiti:
+
+```sql
+CREATE TABLE IF NOT EXISTS chunks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT    NOT NULL,
+    chunk_index   INTEGER NOT NULL,
+    heading       TEXT    NOT NULL DEFAULT '',
+    content       TEXT    NOT NULL,
+    content_hash  TEXT    NOT NULL UNIQUE,
+    embedding     BLOB    NOT NULL,
+    dim           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+
+CREATE TABLE IF NOT EXISTS index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+```
+
+Üç tasarım kararı:
+
+1. **`content_hash TEXT NOT NULL UNIQUE`** + `INSERT OR IGNORE` = yeniden
+   indeksleme idempotent. Aynı parça iki kez eklenirse ikincisi sessizce
+   düşer. Test: `test_duplicate_hash_is_ignored`.
+2. **`dim INTEGER NOT NULL`** her satırda tekrar tutuluyor. Gereksiz görünüyor
+   ama `load_matrix()` bunları kümeye atıp tek boyut olup olmadığını kontrol
+   ediyor; karışıksa `ValueError: Corrupt index: mixed embedding dimensions`.
+   Test: `test_mixed_dimensions_raise`.
+3. **`index_meta`** basit bir anahtar-değer tablosu. Hangi model, hangi parça
+   boyutu ile indekslendiğini tutar. A2.5'te ayrıntısına gireceğiz.
+
+---
+
+## 5. float32 BLOB, JSON değil
+
+`store.py`:
+
+```python
+VECTOR_DTYPE = np.float32
+
+def encode_vector(vector: Sequence[float]) -> bytes:
+    return np.asarray(vector, dtype=VECTOR_DTYPE).tobytes()
+
+def decode_vector(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=VECTOR_DTYPE)
+```
+
+| | float32 BLOB | JSON metin |
+|---|---|---|
+| 1024 boyut için yer | 4096 bayt (boyut başına tam 4) | Sayı başına ~12-20 karakter, ~15 KB |
+| Okuma | `np.frombuffer` -- kopya bile yok | `json.loads` + `np.asarray` |
+| Hassasiyet | ~7 anlamlı ondalık basamak | Tam, ama işe yaramaz kadar fazla |
+| Hata riski | Yazma/okuma dtype'ı aynı olmalı | Yok |
+
+En büyük tuzak son satırda: `float32` yazıp `float64` okursan `numpy` hata
+vermez, sana yarısı kadar uzunlukta ve tamamen anlamsız bir dizi verir. `store.py`
+bunu tek bir `VECTOR_DTYPE` sabiti ile çözüyor -- iki fonksiyon da aynı sabiti
+kullanıyor, ayrışamazlar.
+
+`test_blob_size_is_four_bytes_per_dimension` bu sözleşmeyi kilitliyor:
+
+```python
+def test_blob_size_is_four_bytes_per_dimension():
+    assert len(encode_vector([0.0] * 384)) == 384 * 4
+```
+
+---
+
+# Alıştırmalar
+
+Sıra önemli. A2.1 → A2.5 birbirinin üstüne biniyor.
+
+## A2.1 -- Kosinüs benzerliğini elle hesapla
+
+**Amaç:** Formülü kâğıtta uygulamadan koda güvenme.
+
+`tests/conftest.py` içindeki örnek belgelerden üç cümle alıyoruz. Bunları iki
+boyuta indirdiğimizi varsay: `x` ekseni "kedi/uyku", `y` ekseni "kahve/demleme".
+
+| No | Cümle | Vektör |
+|---|---|---|
+| c1 | "Bir kedi günde ortalama on altı saat uyur." | `(3, 1)` |
+| c2 | "Yavru kediler daha da fazla uyur." | `(4, 0)` |
+| c3 | "Filtre kahve için önerilen su sıcaklığı doksan iki derecedir." | `(0, 2)` |
+
+**Adım 1 -- kâğıtta.** Üç normu hesapla, sonra üç kosinüsü. Ara sonuçları yaz,
+sadece nihai sayıyı değil.
+
+```
+‖c1‖ = √(3² + 1²) = √10 ≈ 3.16228
+‖c2‖ = √(4² + 0²) = 4
+‖c3‖ = √(0² + 2²) = 2
+
+cos(c1, c2) = (3·4 + 1·0) / (√10 · 4)  = 12 / 12.64911 = ?
+cos(c1, c3) = (3·0 + 1·2) / (√10 · 2)  = 2  /  6.32456 = ?
+cos(c2, c3) = (4·0 + 0·2) / (4 · 2)    = 0  /  8       = ?
+```
+
+**Adım 2 -- kodla doğrula.** Repo kökünden:
+
+```bash
+PYTHONPATH=src python -c "
+import numpy as np
+from foundry_rag.retrieval import cosine_similarity
+matrix = np.array([[3.0, 1.0], [4.0, 0.0], [0.0, 2.0]], dtype=np.float32)
+print(np.round(cosine_similarity([3.0, 1.0], matrix), 5))
+"
+```
+
+Beklenen çıktı:
+
+```
+[1.      0.94868 0.31623]
+```
+
+Sırasıyla `cos(c1,c1)`, `cos(c1,c2)`, `cos(c1,c3)`. Üçüncü sayı `1/√10`;
+kâğıttaki sonucunla aynı olmalı.
+
+**Adım 3 -- yorumla.** Şu soruları cevapla (yazılı, birer cümle):
+
+- c2 vektörünü `(400, 0)` yaparsan `cos(c1, c2)` değişir mi? Neden?
+- `cos(c2, c3) = 0` çıktı. Bu iki cümlenin "hiç ilgisi yok" demek mi, yoksa
+  "seçtiğimiz 2 boyutta ortak bileşenleri yok" demek mi?
+- `min_similarity = 0.15` eşiği bu üç skordan hangilerini elerdi?
+
+**Kontrol:** Kâğıttaki üç sayı ile koddan çıkan üç sayı 5 ondalık basamağa kadar
+tutuyor mu?
+
+---
+
+## A2.2 -- Testleri oku, çalıştır, iki test ekle
+
+**Amaç:** Var olan testin ne iddia ettiğini okuyabilmek ve kendi kenar durumunu
+yazabilmek.
+
+**Adım 1 -- oku.** `tests/test_retrieval.py` dosyasını aç. 14 test var, iki gruba
+ayrılmışlar: ilk 8'i saf matematik (`cosine_similarity`, `normalize`), son 6'sı
+`search()` davranışı (`tmp_path` fixture'ı ile geçici bir `VectorStore` kurup).
+
+**Adım 2 -- çalıştır.**
+
+```bash
+python -m pytest tests/test_retrieval.py -q
+python -m pytest tests/test_retrieval.py -v      # her testin adini gor
+```
+
+**Adım 3 -- bozarak öğren.** `retrieval.py` içindeki `normalize()` fonksiyonunda
+`norms[norms == 0] = 1.0` satırını yorum satırı yap ve testi tekrar çalıştır.
+Hangi test kırıldı? Hata mesajını not al, sonra satırı geri koy.
+
+**Adım 4 -- iki yeni test yaz.** `tests/test_retrieval.py` dosyasının sonuna
+ekle.
+
+*Test 1: çok küçük vektörler.* float32'nin en küçük normal sayısı yaklaşık
+`1.18e-38`. Bileşenler `1e-25` civarındayken bileşenlerin kendisi temsil
+edilebilir, ama **kareleri** (`1e-50`) taşma altına düşüp sıfıra yuvarlanır.
+Sonuç: `np.linalg.norm` sıfır döner, `normalize()` içindeki koruma devreye girer,
+ve vektör kendisiyle karşılaştırıldığında `1.0` yerine `0.0` skor alır. Bu bir
+çökme değil, sessiz bir davranış -- testin işi onu belgelemek.
+
+```python
+def test_underflowing_vectors_score_zero_instead_of_nan():
+    """Bilesenlerin karesi float32'de sifira dusunce norm 0 olur.
+
+    normalize() sifir normu 1.0 ile degistirdigi icin nan cikmaz, ama
+    benzerlik 1.0 yerine 0.0 olur. Cokme degil, sessiz davranis.
+    """
+    tiny = np.array([[1e-25, 1e-25]], dtype=np.float32)
+    score = cosine_similarity([1e-25, 1e-25], tiny)[0]
+    assert not np.isnan(score)
+    assert score == pytest.approx(0.0, abs=1e-6)
+```
+
+Şunu da dene ve farkı gör: aynı testi `1e-20` ile yaz. Bu sefer skor `1.0`
+civarında çıkar ama tam `1.0` değil -- normal altı (subnormal) sayılarda
+hassasiyet eridiği için sonuç `1.0`'ın biraz altına da üstüne de düşebilir.
+Eşik nerede? `1e-21`, `1e-22`, `1e-23` ile dene ve hangisinde davranışın
+tamamen değiştiğini bul.
+
+*Test 2: negatif skor.* Zıt yönlü bir vektör `-1.0` skor alır, ve
+`min_similarity`'nin varsayılanı `0.0` olduğu için `search()` onu eler.
+
+```python
+def test_negative_scores_are_filtered_by_default_threshold(tmp_path):
+    with VectorStore(tmp_path / "t.db") as store:
+        store.add_chunks(
+            [
+                ("zit.md", 0, "", "tam zit yon", "h1", [-1.0, 0.0]),
+                ("dik.md", 0, "", "dik yon", "h2", [0.0, 1.0]),
+            ]
+        )
+        # varsayilan min_similarity=0.0 -> -1.0 skorlu parca elenir
+        default_hits = search(store, [1.0, 0.0], top_k=2)
+        assert [h.record.source for h in default_hits] == ["dik.md"]
+
+        # esik -1.0'a cekilirse negatif skor da geri gelir
+        all_hits = search(store, [1.0, 0.0], top_k=2, min_similarity=-1.0)
+        assert [h.record.source for h in all_hits] == ["dik.md", "zit.md"]
+        assert all_hits[1].score == pytest.approx(-1.0, abs=1e-6)
+```
+
+**Adım 5 -- çalıştır.**
+
+```bash
+python -m pytest tests/test_retrieval.py -q
+```
+
+**Kontrol:**
+
+- [ ] `tests/test_retrieval.py` artık 16 test topluyor (`--collect-only` ile say)
+- [ ] Adım 3'te hangi testin kırıldığını yazılı olarak not aldın
+- [ ] `1e-20` ile `1e-25` arasındaki eşiği deneyerek buldun
+
+---
+
+## A2.3 -- SQLite kum havuzu
+
+**Amaç:** Gerçek şemayı okumadan önce SQLite'ın temel işlemlerini kendi ellerinle
+yapmak.
+
+**Adım 1 -- sıfırdan bir tablo.** Bu komut geçici bir dosyaya yazıyor, projenin
+`data/rag.db` dosyasına dokunmuyor:
+
+```bash
+python - <<'PY'
+import sqlite3, tempfile, pathlib
+
+db = pathlib.Path(tempfile.mkdtemp()) / "kum.db"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+
+conn.executescript("""
+CREATE TABLE IF NOT EXISTS notlar (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ders   TEXT NOT NULL,
+    puan   INTEGER NOT NULL
+);
+""")
+
+conn.executemany(
+    "INSERT INTO notlar (ders, puan) VALUES (?, ?)",
+    [("matematik", 85), ("fizik", 70), ("kimya", 92)],
+)
+conn.commit()
+
+for row in conn.execute("SELECT id, ders, puan FROM notlar ORDER BY puan DESC"):
+    print(row["id"], row["ders"], row["puan"])
+
+print("toplam satir:", conn.execute("SELECT COUNT(*) AS n FROM notlar").fetchone()["n"])
+print("dosya:", db)
+conn.close()
+PY
+```
+
+Dikkat edilecekler:
+
+- `?` yer tutucuları. String birleştirme ile SQL yazma; SQL enjeksiyonu buradan
+  başlar.
+- `conn.commit()` olmadan hiçbir şey diske yazılmaz.
+- `conn.row_factory = sqlite3.Row` satırı sonuçlara `row["ders"]` ile isimle
+  erişmeyi açar. `VectorStore.__init__` de aynı satırı kullanıyor.
+
+**Adım 2 -- gerçek şemayı gör.** Projenin veritabanını salt okunur incele:
+
+```bash
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("data/rag.db")
+conn.row_factory = sqlite3.Row
+for row in conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name"):
+    print(f"--- {row['type']}: {row['name']}")
+    print(row["sql"])
+for row in conn.execute("SELECT id, source, chunk_index, heading, dim, LENGTH(embedding) AS blob_bytes FROM chunks LIMIT 5"):
+    print(dict(row))
+conn.close()
+PY
+```
+
+**Adım 3 -- karşılaştır.** `src/foundry_rag/store.py` içindeki `SCHEMA` sabitini
+aç ve kendi kum havuzu tablonla yan yana koy. Şu soruları yazılı cevapla:
+
+| Soru | İpucu |
+|---|---|
+| `content_hash` neden `UNIQUE`? | `add_chunks()` içindeki `INSERT OR IGNORE`'a bak |
+| `dim` sütunu neden her satırda tekrar ediyor? | `load_matrix()` içindeki `dims = {...}` kümesine bak |
+| `idx_chunks_source` indeksi hangi sorguyu hızlandırır? | `sources()` metoduna bak |
+| `index_meta` neden ayrı tablo, `chunks`'a sütun olarak eklenmemiş? | Kaç satır olurdu? |
+| `LENGTH(embedding)` kaç çıktı? `dim` ile ilişkisi ne? | A2.4'ün konusu |
+
+**Kontrol:**
+
+- [ ] Kum havuzu betiği üç satır yazdırdı ve `SELECT` sıralaması `kimya, matematik, fizik` oldu
+- [ ] `sqlite_master` çıktısında `chunks`, `index_meta` ve `idx_chunks_source` üçünü de gördün
+- [ ] Tablodaki beş soruyu yazılı cevapladın
+
+---
+
+## A2.4 -- float32 gidiş-dönüş: hassasiyet nerede kırılıyor
+
+**Amaç:** "float32 yeterli" iddiasını kendi ölçtüğün sayıyla desteklemek.
+
+**Adım 1 -- ölç.**
+
+```bash
+PYTHONPATH=src python - <<'PY'
+import numpy as np
+from foundry_rag.store import encode_vector, decode_vector
+
+rng = np.random.default_rng(0)
+orijinal = rng.normal(size=1024).tolist()      # 1024 boyut, qwen3-embedding ile ayni
+geri = decode_vector(encode_vector(orijinal))
+
+print("blob boyutu :", len(encode_vector(orijinal)), "bayt")
+print("dizi uzunlugu:", len(geri), "dtype:", geri.dtype)
+print("en buyuk mutlak hata:", float(np.max(np.abs(np.array(orijinal) - geri))))
+
+for atol in (1e-4, 1e-5, 1e-6, 1e-7, 1e-8):
+    print(f"allclose(atol={atol:g}) ->", np.allclose(geri, orijinal, atol=atol, rtol=0))
+PY
+```
+
+Bu makinede alınan çıktı:
+
+```
+blob boyutu : 4096 bayt
+dizi uzunlugu: 1024 dtype: float32
+en buyuk mutlak hata: 1.1836993829561493e-07
+allclose(atol=0.0001) -> True
+allclose(atol=1e-05) -> True
+allclose(atol=1e-06) -> True
+allclose(atol=1e-07) -> False
+allclose(atol=1e-08) -> False
+```
+
+**Kırılma noktası `1e-6` ile `1e-7` arasında.** Bu tesadüf değil: float32'nin
+mantisi 24 bit, dolayısıyla makine epsilonu `2⁻²³ ≈ 1.19e-7`. `-1..+1`
+aralığındaki sayılarda beklenen en büyük hata tam olarak bu mertebede.
+
+`test_store.py` içindeki testin neden `atol=1e-6` seçtiği de buradan anlaşılıyor:
+
+```python
+# float32 storage: exact equality is not guaranteed, 1e-6 is plenty
+assert np.allclose(restored, original, atol=1e-6)
+```
+
+**Adım 2 -- hata mutlak değil, göreli.** Aynı vektörü büyüterek tekrarla:
+
+```bash
+PYTHONPATH=src python - <<'PY'
+import numpy as np
+from foundry_rag.store import encode_vector, decode_vector
+
+rng = np.random.default_rng(0)
+for olcek in (1, 1000, 1e6):
+    o = rng.normal(size=1024) * olcek
+    g = decode_vector(encode_vector(o.tolist()))
+    print(f"olcek={olcek:>10} en buyuk mutlak hata = {float(np.max(np.abs(o - g))):.6e}")
+PY
+```
+
+Bu makinede alınan çıktı:
+
+```
+olcek=         1 en buyuk mutlak hata = 1.183699e-07
+olcek=      1000 en buyuk mutlak hata = 1.220204e-04
+olcek=   1000000 en buyuk mutlak hata = 1.212174e-01
+```
+
+Ölçek 1000 katına çıkınca hata da 1000 katına çıkıyor. float32'nin garantisi
+**mutlak** değil **göreli** hassasiyettir: yaklaşık 7 anlamlı ondalık basamak.
+
+**Adım 3 -- neden bu bizi ilgilendirmiyor.** Embedding vektörleri normalize
+edildikten sonra her bileşen `[-1, +1]` içinde. Kosinüs skorunda gördüğün
+oynama `1e-7` mertebesinde, `min_similarity = 0.15` eşiği ise iki ondalık
+basamakla çalışıyor. Aradaki mesafe beş büyüklük mertebesi.
+
+**Adım 4 -- yanlış dtype tuzağını gör.** Bu, projedeki en sinsi hata sınıfı:
+
+```bash
+PYTHONPATH=src python - <<'PY'
+import numpy as np
+from foundry_rag.store import encode_vector
+
+blob = encode_vector([1.0, 2.0, 3.0, 4.0])
+print("dogru  (float32):", np.frombuffer(blob, dtype=np.float32))
+print("yanlis (float64):", np.frombuffer(blob, dtype=np.float64))
+PY
+```
+
+Hata yok, uyarı yok. Sadece yanlış uzunlukta ve anlamsız değerlerde bir dizi.
+Projenin savunması `store.py` tepesindeki tek `VECTOR_DTYPE = np.float32`
+sabiti -- `encode_vector` ve `decode_vector` ikisi de onu kullanıyor.
+
+**Kontrol:**
+
+- [ ] `1024 × 4 = 4096` bayt eşitliğini kendi çıktında gördün
+- [ ] `allclose`'un `1e-6` ile `1e-7` arasında kırıldığını doğruladın
+- [ ] Ölçek büyüdükçe mutlak hatanın orantılı büyüdüğünü gördün
+- [ ] Yanlış dtype ile okumanın hata vermediğini gördün
+
+---
+
+## A2.5 -- `info` komutu ve `embedding_signature`
+
+**Amaç:** İndeksin hangi vektör uzayına ait olduğunun neden kayıt altına
+alındığını anlamak.
+
+**Adım 1 -- çalıştır.**
+
+```bash
+python -m app.cli --backend hashing ingest
+python -m app.cli info
+```
+
+`info` çıktısı (`app/cli.py` içindeki `cmd_info`):
+
+```
+Veritabani : /Users/.../foundry-local-rag/data/rag.db
+Parca      : 54
+Belge      : 8
+
+Meta:
+  embedding_signature    hashing-offline:512
+  backend                hashing-offline
+  chunk_size             900
+  chunk_overlap          150
+  document_count         8
+
+Belgeler:
+  - 01-rag-nedir.md
+  ...
+```
+
+**Adım 2 -- imza nereden geliyor.** `backends/base.py`:
+
+```python
+def embedding_signature(self) -> str:
+    """Identity of the vector space, stored alongside the index."""
+    return f"{self.name}:{self.embedding_dim}"
+```
+
+`FoundryBackend` bunu ezip model adını da katıyor (`backends/foundry.py`):
+
+```python
+def embedding_signature(self) -> str:
+    return f"{self.name}:{self.embedding_model_alias}:{self.embedding_dim}"
+```
+
+| Backend | İmza |
+|---|---|
+| `HashingBackend` | `hashing-offline:512` |
+| `FoundryBackend` (`qwen3-embedding-0.6b`) | `foundry-local:qwen3-embedding-0.6b:1024` |
+
+İndeksleme sırasında `pipeline.ingest()` bunu yazıyor:
+
+```python
+store.set_meta(META_SIGNATURE, backend.embedding_signature())
+```
+
+**Adım 3 -- ne işe yarıyor.** `RagPipeline._check_index()` her açılışta
+karşılaştırıyor:
+
+```python
+stored = self.store.get_meta(META_SIGNATURE)
+current = self.backend.embedding_signature()
+if stored and stored != current:
+    raise RuntimeError(
+        "Indeks farkli bir embedding modeliyle olusturulmus.\n"
+        f"  indekste: {stored}\n"
+        f"  simdiki : {current}\n"
+        "Vektor uzaylari uyumsuz. Yeniden indeksle:\n"
+        "  python -m app.cli ingest"
+    )
+```
+
+Bu kontrol olmasaydı iki senaryo vardı:
+
+1. **Boyutlar farklı (512 vs 1024).** `cosine_similarity()` içindeki
+   `Dimension mismatch` hatası yakalardı -- yani çökerdik ama en azından sesli.
+2. **Boyutlar aynı, model farklı.** Hiçbir şey hata vermezdi. Skorlar hesaplanır,
+   sıralama yapılır, cevap üretilir -- ve tamamı çöp olur. Sessiz yanlışlık,
+   gürültülü çökmeden çok daha kötüdür. `embedding_signature` işte bu ikinci
+   senaryoyu yakalamak için var.
+
+**Adım 4 -- bozup gör.** İmzayı elle bozup davranışı kendin tetikle:
+
+```bash
+PYTHONPATH=src python -c "
+from foundry_rag.store import VectorStore
+with VectorStore('data/rag.db') as s:
+    print('eski:', s.get_meta('embedding_signature'))
+    s.set_meta('embedding_signature', 'sahte-model:9999')
+"
+
+python -m app.cli --backend hashing ask "RAG nedir?"
+```
+
+Beklenen: `[hata] Indeks farkli bir embedding modeliyle olusturulmus.` mesajı ve
+çıkış kodu `1` (`main()` içindeki `except (RuntimeError, ValueError, ...)` dalı).
+
+Düzelt:
+
+```bash
+python -m app.cli --backend hashing ingest
+python -m app.cli --backend hashing ask "RAG nedir?"
+```
+
+**Adım 5 -- yaz.** Kendi cümlelerinle, en fazla beş cümlede:
+`embedding_signature` ne saklıyor, kim yazıyor, kim okuyor, okuduğunda uyuşmazsa
+ne oluyor, ve neden bu kontrol `dim` sütunu kontrolünden farklı bir işe yarıyor.
+
+**Kontrol:**
+
+- [ ] `info` çıktısında `embedding_signature` değerini `hashing-offline:512` olarak gördün
+- [ ] İmzayı bozunca hata mesajını aldın
+- [ ] Yeniden indeksleyip düzelttin
+- [ ] Beş cümlelik açıklamayı yazdın
+
+---
+
+# Hafta sonu kontrol listesi
+
+## Anlama
+
+- [ ] Kosinüs benzerliği formülünü kâğıda bakmadan yazabiliyorum
+- [ ] "Neden uzunluk değil yön?" sorusunu bir örnekle açıklayabiliyorum
+- [ ] Normalize edilmiş vektörlerde kosinüsün neden nokta çarpımına indiğini gösterebiliyorum
+- [ ] `top_k` ve `min_similarity`'nin farklı işler yaptığını, birinin diğerinin yerini tutmadığını anlatabiliyorum
+- [ ] Eşik olmadan sistemin neden "bilmiyorum" diyemeyeceğini açıklayabiliyorum
+- [ ] float32'nin göreli hassasiyetinin neden bu proje için yeterli olduğunu savunabiliyorum
+- [ ] `embedding_signature` kontrolünün hangi sessiz hatayı yakaladığını anlatabiliyorum
+
+## Yapma
+
+- [ ] A2.1: Üç kosinüsü kâğıtta hesapladım, `cosine_similarity` ile 5 ondalık basamağa kadar tuttu
+- [ ] A2.2: `tests/test_retrieval.py`'ı okudum, çalıştırdım, iki test ekledim, 16 test geçiyor
+- [ ] A2.3: Kum havuzu tablosunu kurdum, `data/rag.db`'nin gerçek şemasını gördüm, beş soruyu cevapladım
+- [ ] A2.4: `1e-6`/`1e-7` kırılma noktasını ölçtüm, ölçek etkisini gördüm, dtype tuzağını denedim
+- [ ] A2.5: İmzayı bozdum, hatayı aldım, yeniden indeksledim
+
+## Doğrulama komutları
+
+```bash
+python -m pytest tests/ -q                       # tumu gecmeli
+python -m pytest tests/test_retrieval.py -q      # 16 test (2 tanesi senin)
+python -m app.cli info                           # embedding_signature dolu olmali
+python eval/evaluate.py --backend hashing        # taban cizgisini not al
+```
+
+## Teslim
+
+Tek bir markdown dosyası (`hafta-2-teslim.md`):
+
+1. A2.1'in kâğıt hesabı (ara adımlarla) ve kod çıktısı
+2. A2.2'de yazdığın iki testin kodu + `1e-20`..`1e-25` arasında bulduğun kırılma eşiği
+3. A2.3'teki beş sorunun cevabı
+4. A2.4'ün iki çıktısı ve kırılma noktası yorumu
+5. A2.5 Adım 5'teki beş cümle
+6. `python eval/evaluate.py --backend hashing` çıktısı (Hafta 3'te karşılaştıracağız)
+
+## Haftaya ne var
+
+Hafta 3'te `HashingBackend`'i bırakıp Foundry Local SDK 1.x'i kuruyoruz:
+Python 3.12 venv, `qwen3-embedding-0.6b` (1024 boyut) ve `qwen2.5-0.5b`
+indirmesi, `scripts/doctor.py` ile ortam doğrulama. Bu haftaki taban çizgisini
+(Recall@4 %72.0 / MRR 0.650) elinin altında tut -- ilk işimiz onu yeniden
+ölçmek olacak.

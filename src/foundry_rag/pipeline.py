@@ -15,11 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from . import groundedness
 from .backends import Backend, create_backend
 from .chunking import Chunk, chunk_document
 from .config import Settings
+from .groundedness import GroundednessReport
+from .lexical import BM25Index
 from .prompts import NO_CONTEXT_ANSWER, build_messages
-from .retrieval import SearchHit, search
+from .retrieval import SearchHit, hybrid_search
 from .store import VectorStore
 
 #: how many chunks to embed per model call
@@ -65,6 +68,8 @@ class Answer:
     retrieval_seconds: float = 0.0
     generation_seconds: float = 0.0
     grounded: bool = True
+    #: per-sentence support audit, when groundedness checking is enabled
+    groundedness: GroundednessReport | None = None
 
     @property
     def sources(self) -> list[str]:
@@ -185,6 +190,16 @@ class RagPipeline:
         self.store = VectorStore(self.settings.db_path)
         self._check_index()
 
+        # Load the index into memory once, here, rather than on every question.
+        # At this scale the whole matrix is a few megabytes and re-reading it
+        # per query was pure waste.
+        self.matrix, self.records = self.store.load_matrix()
+        self.bm25 = (
+            BM25Index([f"{r.heading}\n{r.content}" for r in self.records])
+            if self.settings.hybrid
+            else None
+        )
+
     def _check_index(self) -> None:
         """Refuse to answer against an index built by a different embedder."""
         if self.store.count() == 0:
@@ -206,14 +221,23 @@ class RagPipeline:
     # -- retrieval -------------------------------------------------------
 
     def retrieve(self, question: str) -> tuple[list[SearchHit], float]:
-        """Find the passages most relevant to ``question``."""
+        """Find the passages most relevant to ``question``.
+
+        Runs dense and lexical retrieval together when ``settings.hybrid`` is
+        on, which is the default. Turning it off gives plain cosine search and
+        is the baseline the hybrid mode is measured against.
+        """
         started = time.perf_counter()
         query_vector = self.backend.embed([question])[0]
-        hits = search(
-            self.store,
+        hits = hybrid_search(
+            self.records,
+            self.matrix,
             query_vector,
+            query_text=question,
+            bm25=self.bm25,
             top_k=self.settings.top_k,
             min_similarity=self.settings.min_similarity,
+            lexical_scale=self.settings.lexical_scale,
         )
         return hits, time.perf_counter() - started
 
@@ -245,12 +269,22 @@ class RagPipeline:
             temperature=self.settings.temperature,
             max_tokens=self.settings.max_tokens,
         )
+        generation_seconds = time.perf_counter() - started
+        text = text.strip() or NO_CONTEXT_ANSWER
+
+        # Retrieving the right passage does not guarantee the model stayed
+        # inside it. Audit the answer against what was actually retrieved.
+        report = (
+            groundedness.check(text, hits) if self.settings.check_groundedness else None
+        )
+
         return Answer(
             question=question,
-            text=text.strip() or NO_CONTEXT_ANSWER,
+            text=text,
             hits=hits,
             retrieval_seconds=retrieval_seconds,
-            generation_seconds=time.perf_counter() - started,
+            generation_seconds=generation_seconds,
+            groundedness=report,
         )
 
     def stream_answer(self, question: str) -> Iterable[str]:

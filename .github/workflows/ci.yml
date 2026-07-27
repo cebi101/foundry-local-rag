@@ -42,8 +42,11 @@ jobs:
           python -m app.cli --backend hashing info
           python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
 
-      - name: Run the evaluation set
-        run: python eval/evaluate.py --backend hashing --no-save
+      - name: Retrieval quality gate
+        # Unit tests catch broken code. They do not catch a prompt tweak or a
+        # chunk-size change that quietly costs ten points of recall. This makes
+        # retrieval quality a build-breaking property.
+        run: python eval/evaluate.py --backend hashing --no-save --gate
 
       - name: Environment doctor
         # Informational: on CI this reports "Foundry Local not installed",

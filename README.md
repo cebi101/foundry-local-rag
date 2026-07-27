@@ -19,11 +19,94 @@ Soru ──▶ embedding ──▶ SQLite'ta vektör arama ──▶ en ilgili K
 
 - `data/docs/` altındaki belgeleri parçalara böler, her parçanın embedding'ini
   üretir ve SQLite'a yazar.
-- Sorduğunuz soruyu aynı modelle vektörleştirir, kosinüs benzerliğiyle en ilgili
-  parçaları bulur.
-- Bu parçaları bağlam olarak yerel bir dil modeline verir ve **kaynak göstererek**
-  cevap üretir.
+- Sorduğunuz soruyu **hem anlamsal hem kelime tabanlı** arar, iki sonucu birleştirir.
+- Bulunan parçaları bağlam olarak yerel bir dil modeline verir ve **kaynak
+  göstererek** cevap üretir.
 - Cevap belgelerde yoksa uydurmaz, "Bu bilgi elimdeki belgelerde yok." der.
+- **Ürettiği cevabı sonradan denetler** ve bağlamda dayanağı olmayan cümleleri
+  işaretler.
+
+---
+
+## Bu projeyi standart bir RAG tutorial'ından ayıran dört şey
+
+Hepsi ölçülmüş bir problemi çözüyor ve etkisi `eval/` ile kanıtlanıyor.
+
+### 1. Türkçe morfoloji duyarlı arama
+
+Türkçe eklemeli bir dildir: `belge · belgeler · belgelerden · belgelerin` aynı
+kavramın dört yüzüdür ama kelime eşleştiren bir arama için dört farklı kelimedir.
+[`turkish.py`](src/foundry_rag/turkish.py) üç şeyi çözer:
+
+- **Noktalı/noktasız I.** Python'un `.lower()` metodu `I → i` yapar; Türkçede
+  doğrusu `I → ı`, `İ → i`. Bu hata, içinde I geçen her kelimede eşleşmeyi sessizce bozar.
+- **Kesme işaretli ekler.** `RAG'in`, `SQLite'ta` → kök bedavaya çıkar.
+- **Ünlü uyumlu ek ayıklama** + ünsüz yumuşaması geri alma (`benzerliği → benzerlik → benzer`).
+
+Kural tabanlı bir stemmer `belge`(kök) ile `belgeler`(çekimli) arasındaki son
+ünlünün ek mi kök mü olduğunu bilemez. Bu yüzden indeks **hem yüzey biçimini hem
+gövdeyi** tutar; ikisinden biri tutar. 12 kelime ailesinde 12/12 eşleşme,
+kontrol çiftlerinde (`kedi`~`kahve`, `model`~`modern`) sıfır yanlış pozitif.
+
+### 2. Hibrit getirme: BM25 + vektör, RRF ile birleştirme
+
+İki arama farklı yerlerde başarısız olur. Vektör araması nadir literal
+ifadeleri kaçırır (`1536`, bir model adı, bir hata kodu) — çünkü embedding tam
+da onları nadir yapan detayı bulanıklaştırır. Kelime araması ise eş anlamlıyı
+kaçırır (`araba fiyatları` ↔ `otomobil ücretleri`).
+
+İkisi de çalıştırılır ve **Reciprocal Rank Fusion** ile birleştirilir. Füzyon
+skora değil **sıraya** bakar: kosinüs [-1,1] aralığında, BM25 ise sınırsız ve
+korpusa bağlıdır — ham skorları toplamak her korpusta yeniden ayar ister,
+sıralar ise kalibrasyonsuz karşılaştırılabilir.
+
+### 3. Kaynaklılık denetleyici (halüsinasyon dedektörü)
+
+Doğru parçayı getirmek, modelin o parçanın içinde kaldığı anlamına gelmez. Model
+boşluk doldurur, geçiş cümlesi uydurur, ezberinden bir şey karıştırır — ve
+uydurulmuş bir cümle, yanındaki kaynak etiketiyle birlikte, doğru olandan
+**ayırt edilemez** görünür.
+
+[`groundedness.py`](src/foundry_rag/groundedness.py) cevabın her cümlesini
+getirilen parçalara karşı puanlar ve dayanaksızları işaretler. Ölçüm, Türkçe
+morfoloji üzerinden IDF ağırlıklı içerik kelimesi örtüşmesi: nadir kelimeler
+ağır basar, işlev kelimeleri hiç sayılmaz.
+
+```
+DOGRU   -> Kaynaklilik: %100 (2/2 cümle dayanaklı)
+UYDURMA -> Kaynaklilik: %0  (0/2)  [!] (0.21) Kosinüs benzerliği 1950'de Isaac Newton...
+```
+
+Bu bir NLI modeli değil — çelişkiyi ve ortak kelimesiz eş anlamlıyı yakalayamaz.
+Ama ikinci bir model indirmesi de gerektirmez ve asıl önemli hatayı güvenilir
+biçimde yakalar: **modelin bağlamda hiç geçmeyen bir şeyi iddia etmesi.**
+
+### 4. Eşik kalibrasyonu ve CI kalite kapısı
+
+`min_similarity` ne zaman cevap verileceğine karar verir. Düşük olursa sistem
+bilmediğini uydurur, yüksek olursa bildiğini reddeder. Soyut bir doğru değeri
+yoktur — korpusa, modele ve retriever'a bağlıdır.
+
+Tahmin etmenin bedeli bu projede ölçüldü: `0.15` dense-only kosinüs için
+ayarlanmıştı; BM25 eklenince skor dağılımı altından kaydı ve reddetme doğruluğu
+%87.5'ten %12.5'e çöktü. [`calibrate.py`](eval/calibrate.py) 66 noktalık ızgarayı
+tarayıp takas eğrisini çıkarır ve noktayı veriyle seçer.
+
+CI'da [`--gate`](eval/evaluate.py) metrikler eşiğin altına düşerse build'i kırar.
+Testler bozuk kodu yakalar; sessizce on puan recall kaybettiren bir prompt
+değişikliğini yakalayamaz.
+
+### Ölçülen etki
+
+| | Dense-only, tahmini eşik | Hibrit + kalibre | |
+|---|---|---|---|
+| Recall@4 | %72.0 | **%88.0** | +16 puan |
+| MRR | 0.650 | **0.793** | +0.14 |
+| Reddetme doğruluğu | %87.5 | **%100.0** | +12.5 puan |
+| **Genel doğruluk** | **%75.8** | **%90.9** | **+15.1 puan** |
+
+Çevrimdışı `hashing` backend, 33 soruluk set, `top_k=4`. Her iki eksende birden
+iyileşme — recall'u reddetmeden çalmadan.
 
 ---
 
@@ -124,9 +207,12 @@ Tüm ayarlar `FRAG_*` ortam değişkenleriyle geçersiz kılınabilir; bkz.
 ## Test ve değerlendirme
 
 ```bash
-python -m pytest tests/ -q            # 67 test, çevrimdışı, ~0.2 sn
-python eval/evaluate.py               # sadece getirme kalitesi (hızlı)
-python eval/evaluate.py --generate    # cevapları da üret (yavaş)
+python -m pytest tests/ -q             # 145 test, çevrimdışı, ~0.5 sn
+python eval/evaluate.py                # sadece getirme kalitesi (hızlı)
+python eval/evaluate.py --generate     # cevapları da üret (yavaş)
+python eval/evaluate.py --gate         # CI kalite kapısı: regresyonda exit 1
+python eval/calibrate.py               # eşikleri veriden seç
+FRAG_HYBRID=0 python eval/evaluate.py  # hibrit kapalı — karşılaştırma tabanı
 ```
 
 Değerlendirme seti 33 sorudan oluşur: **25 cevaplanabilir + 8 cevaplanamaz**.
@@ -138,16 +224,15 @@ bilmediği bir konuda kendinden emin şekilde uydurmasıdır. Ölçülen metrikl
 | `Recall@K` | Doğru kaynak ilk K parça içinde geldi mi? |
 | `MRR` | Doğru kaynak kaçıncı sırada geldi? (1. sıra > 5. sıra) |
 | Reddetme doğruluğu | Cevaplanamaz sorularda "bilmiyorum" dedi mi? |
+| `balanced` | Recall ile reddetmenin harmonik ortalaması |
 
-**Taban çizgisi** (çevrimdışı `hashing` backend, `top_k=4`, `min_similarity=0.15`):
+Son metrik kasıtlı olarak harmonik ortalamadır: aritmetik ortalama alınsaydı,
+her soruyu cevaplayıp hiçbirini reddetmeyen bir sistem %50 alırdı. Harmonik
+ortalama, iki taraftan biri feda edilirse sıfıra gider.
 
-| Recall@4 | MRR | Reddetme | Genel |
-|---|---|---|---|
-| %72.0 | 0.650 | %87.5 | %75.8 |
-
-Bu skorlar kasıtlı olarak vasattır — `hashing` backend anlamsal değil, kelime
-örtüşmesine dayalı çalışır. Gerçek embedding modeliyle karşılaştırma yapmak
-Hafta 4'ün alıştırmalarından biridir.
+Skorlar `hashing` backend içindir; bu backend anlamsal değil kelime örtüşmesine
+dayalı çalışır, dolayısıyla gerçek embedding modelinin **alt sınırıdır**.
+İkisini karşılaştırmak Hafta 4'ün alıştırmalarından biridir.
 
 ---
 
@@ -158,7 +243,10 @@ src/foundry_rag/
   config.py          Ayarlar (Settings), FRAG_* ortam değişkenleri
   chunking.py        Belge parçalama — başlık duyarlı, örtüşmeli
   store.py           SQLite katmanı, float32 BLOB vektör saklama
-  retrieval.py       Kosinüs benzerliği, top-K arama
+  turkish.py         Türkçe normalizasyon, ek ayıklama, gövde genişletme
+  lexical.py         BM25 indeksi ve doyum fonksiyonu
+  retrieval.py       Kosinüs benzerliği, RRF füzyonu, hibrit arama
+  groundedness.py    Cevap denetimi — dayanaksız cümle tespiti
   prompts.py         Sistem istemi (5 kural) ve bağlam kurulumu
   pipeline.py        ingest() ve RagPipeline.answer()
   backends/
@@ -169,8 +257,11 @@ app/
   cli.py             Komut satırı arayüzü
   streamlit_app.py   Web arayüzü
 scripts/doctor.py    Ortam kontrolü
-eval/                33 soruluk değerlendirme seti + ölçüm aracı
-tests/               67 test (hepsi çevrimdışı)
+eval/
+  questions.json     33 soru (25 cevaplanabilir + 8 cevaplanamaz)
+  evaluate.py        Recall@K, MRR, reddetme doğruluğu + CI kalite kapısı
+  calibrate.py       Eşik taraması — takas eğrisi ve optimum nokta
+tests/               145 test (hepsi çevrimdışı, ~0.5 sn)
 data/docs/           Örnek bilgi tabanı — 8 Türkçe ders notu
 docs/                Kurulum, mimari, sorun giderme + 6 haftalık müfredat
 ```
