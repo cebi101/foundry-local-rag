@@ -20,7 +20,7 @@ alias'larini kontrol eder. Cikti satirlari uc isaretten biriyle baslar:
 | `[!!]` | Uyari; proje calisir ama sinirli calisir |
 | `[XX]` | Hata; duzeltmeden Foundry Local calismaz |
 
-`[XX]` satirlarinin altindaki `->` satiri, calistiraacagin komutu verir.
+`[XX]` satirlarinin altindaki `->` satiri, calistiracagin komutu verir.
 `doctor.py` bir veya daha fazla `[XX]` bulursa cikis kodu `1` doner.
 
 ## Hizli tablo
@@ -348,6 +348,18 @@ Baslangicta yazdirilan satirda `gpu` yerine `cpu` goruyorsun:
 
 Hicbir hata mesaji yoktur. Sadece cevap uretimi beklediginden cok daha yavastir.
 
+### Once ayirt et: embedding mi, sohbet mi
+
+Iki satir ayni gorunur ama sebepleri farklidir.
+
+| Satir | `-generic-cpu` ne demek |
+| --- | --- |
+| `embedding: ...` | **Kasitli.** macOS arm64'te `device="auto"` iken proje embedding icin CPU varyantini bilerek secer (`backends/foundry.py`, `_embedding_device_default()`). Sebep: `qwen3-embedding-0.6b`'nin `-generic-gpu` varyanti bu platformda vektore Inf/NaN yaziyor ve hata SDK'nin JSON serilestiricisinde patliyor (`positive and negative infinity cannot be written as valid JSON`). `embed()` bu hatayi yakalayip tek seferlik CPU'ya da gecer. Zorlamak icin `FRAG_DEVICE=gpu`. |
+| `chat: ...` | Muhtemelen asagidaki ust kaynak hatasi. Sohbet modelinin varyantini Foundry Local kendi secer, proje karismaz. |
+
+Yani embedding satirinda CPU gormek **bir ariza degildir**. Asagisi sohbet
+modeli icindir.
+
 ### Sebep
 
 Foundry Local'da acik bir hata var: **execution provider dogru kaydolsa bile**
@@ -555,8 +567,8 @@ verip cikis kodu 2 ile biter. Deneylerde bu daha guvenlidir.
 **Boyut uyusmazligi** (`src/foundry_rag/retrieval.py`, `cosine_similarity()`):
 
 ```
-Dimension mismatch: query has 1024 dims but the index has 512 dims.
-The query and the index must use the same embedding model -- re-run ingestion.
+Dimension mismatch: query has 1024 dims but the index has 512. The query and the
+index must use the same embedding model -- re-run ingestion.
 ```
 
 **Karisik boyutlu indeks** (`src/foundry_rag/store.py`, `load_matrix()`):

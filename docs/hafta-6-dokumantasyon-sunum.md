@@ -35,7 +35,7 @@ source .venv/bin/activate
 
 python --version              # 3.11 veya üstü olmalı
 python scripts/doctor.py      # ortam kontrolü
-python -m pytest tests/ -q    # 67 test, hepsi geçmeli
+python -m pytest tests/ -q    # 145 test, hepsi geçmeli
 python -m app.cli info        # indekste kaç parça / kaç belge var?
 ```
 
@@ -210,15 +210,15 @@ Değerlendirme seti: **[N] soru** ([X] cevaplanabilir + [Y] cevaplanamaz).
 | Ölçümler | `eval/questions.json`, `eval/evaluate.py`, kendi `eval/results.jsonl` kayıtların |
 | Sınırlar | README "Gereksinimler ve sınırlar" + "Bilinen üst-akış hataları" |
 
-Bu deponun ölçülmüş taban çizgisi (çevrimdışı `hashing` backend, `top_k=4`,
-`min_similarity=0.15`):
+Bu deponun ölçülmüş sonuçları (çevrimdışı `hashing` backend, `top_k=4`):
 
-| Recall@4 | MRR | Reddetme doğruluğu | Genel doğruluk |
-| --- | --- | --- | --- |
-| %72.0 | 0.650 | %87.5 | %75.8 |
+| Yapılandırma | Recall@4 | MRR | Reddetme doğruluğu | Genel doğruluk |
+| --- | --- | --- | --- | --- |
+| Yalnız vektör, eşik `0.15` (`FRAG_HYBRID=0`) | %72.0 | 0.650 | %87.5 | %75.8 |
+| Hibrit + kalibre eşik `0.30` (varsayılan) | %88.0 | 0.793 | %100.0 | %90.9 |
 
-Kendi tablona bu satırı **karşılaştırma zemini** olarak koy. Tek bir sütunluk tablo
-hiçbir şey anlatmaz; iki satır olduğu anda anlatmaya başlar.
+Kendi tablona bu iki satırı **karşılaştırma zemini** olarak koy. Tek bir satırlık
+tablo hiçbir şey anlatmaz; iki satır olduğu anda anlatmaya başlar.
 
 > `eval/results.jsonl` dosyası `.gitignore` içindedir, yani GitHub'a gitmez.
 > Rapora girecek sayıları oradan **elle** markdown tablosuna taşı. Sunumdan sonra
@@ -386,11 +386,11 @@ grep -rn " $" src app tests | head        # satır sonu boşlukları
 ### 4.6 Testler geçiyor
 
 ```bash
-python -m pytest tests/ -q                 # 67 test
+python -m pytest tests/ -q                 # 145 test
 python -m app.cli --backend hashing ingest
 python -m app.cli --backend hashing info
 python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
-python eval/evaluate.py --backend hashing --no-save
+python eval/evaluate.py --backend hashing --no-save --gate
 python scripts/doctor.py
 ```
 
@@ -404,7 +404,7 @@ Bir test kırıldıysa iki seçeneğin var: kodu düzelt ya da testin yanlış o
 ### 4.7 Teslim öncesi son kontrol
 
 - [ ] `git status` temiz.
-- [ ] `python -m pytest tests/ -q` -- 67 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
 - [ ] `src/` altında `verbose` bayrağına bağlı olmayan debug `print` yok.
 - [ ] `TODO` / `FIXME` kalmadı (ya da hepsi README "Sınırlar" bölümünde yazılı).
 - [ ] Kullanılmayan import ve fonksiyon yok.
@@ -560,7 +560,7 @@ data/docs/*.md
    -> add_chunks()        store.py       SQLite, float32 BLOB
 soru
    -> backend.embed()     backends/      soru -> vektör
-   -> search()            retrieval.py   kosinüs benzerliği, top_k=4, eşik 0.15
+   -> hybrid_search()     retrieval.py   kosinüs + BM25, RRF, top_k=4, eşik 0.30
    -> build_messages()    prompts.py     5 kurallı sistem istemi + bağlam
    -> backend.chat()      backends/      yerel LLM
    -> cevap + kaynaklar
@@ -574,8 +574,10 @@ Anlatılacak en fazla üç karar. Öneri:
 2. **Neden vektörler float32 BLOB olarak saklanıyor?** JSON yerine ham bayt: küçük
    ve tek `numpy` çağrısıyla geri okunuyor. Yazarken float32, okurken float64
    kullanırsan sessizce çöp elde edersin (`store.py`).
-3. **Neden `min_similarity` eşiği var?** Eşiksiz bir sistem, cevabı olmayan soruda
-   "en az kötü" parçaları döndürür ve model uydurur (`retrieval.py`, `search()`).
+3. **Neden `min_similarity` eşiği var ve neden veriden seçildi?** Eşiksiz bir
+   sistem, cevabı olmayan soruda "en az kötü" parçaları döndürür ve model
+   uydurur (`retrieval.py`, `hybrid_search()`). Eşik tahmin edilmedi;
+   `eval/calibrate.py` ızgara taramasıyla seçildi.
 
 **Ölçümler (2 dk).** Tek tablo, en az iki satır. Ardından **bir başarısızlık örneği**:
 sistemin yanlış cevapladığı gerçek bir soru ve sebebine dair hipotezin. Kendi
@@ -622,19 +624,26 @@ Beklenen çıktının yapısı (`app/cli.py`, `cmd_ask` ve `_print_sources`):
 <cevap metni, iddiaların sonunda [dosya-adi.md] biçiminde kaynak>
 
 Kaynaklar:
-  [1] 03-embedding-ve-vektor-arama.md > <bölüm>  (benzerlik: 0.xxx)
+  [1] 03-embedding-ve-vektor-arama.md > <bölüm>
+      guven 0.xxx | anlam 0.xxx | kelime x.xx | bulan: ikisi
   [2] ...
 
   getirme: xx ms | uretim: x.xx sn
+
+Kaynaklilik: %100 (3/3 cumle dayanakli)
 ```
 
 Ekranda **göstererek** söylenecekler:
 
 1. Cevabın içindeki köşeli parantezli kaynak: bu, sistem isteminin 3. kuralının
    sonucudur (`src/foundry_rag/prompts.py`).
-2. `Kaynaklar` listesi ve benzerlik skorları: cevabın nereden geldiği denetlenebilir.
+2. `Kaynaklar` listesi ve skorlar: `guven` cevap/reddetme kararında kullanılan
+   skor, `anlam` kosinüs benzerliği, `kelime` BM25 skoru, `bulan` parçayı hangi
+   aramanın getirdiği. Cevabın nereden geldiği denetlenebilir.
 3. Süre satırı: getirme milisaniye, üretim saniye mertebesinde. Darboğaz modeldir,
    arama değil.
+4. `Kaynaklilik` satırı: `groundedness.py` cevabın her cümlesini getirilen
+   parçalara karşı puanlar; dayanaksız cümleler `[!]` ile işaretlenir.
 
 Ardından kaynak dosyayı aç ve cevabın gerçekten orada yazdığını göster. Bu tek hareket,
 "uydurmuyor" iddianı slayttan daha iyi kanıtlar.
@@ -657,7 +666,7 @@ Anlatılacak: bu cümle modelden gelmiyor olabilir. İki savunma katmanı var:
 
 | Katman | Nerede | Ne yapar |
 | --- | --- | --- |
-| 1. Eşik | `retrieval.py` -> `search()`, `min_similarity=0.15` | Hiçbir parça eşiği geçmezse boş liste döner |
+| 1. Eşik | `retrieval.py` -> `hybrid_search()`, `min_similarity=0.30` | Hiçbir parça eşiği geçmezse boş liste döner |
 | 2. Boru hattı | `pipeline.py` -> `RagPipeline.answer()` | Hit yoksa modeli hiç çağırmaz, `NO_CONTEXT_ANSWER` döndürür |
 | 3. İstem | `prompts.py` -> `SYSTEM_PROMPT` 2. kural | Parça geldiği hâlde cevap yoksa modele reddetmesini söyler |
 
@@ -665,8 +674,9 @@ Sahnede hangi katmanın devreye girdiğini söyle. Kaynak listesi hiç basılmad
 2. katman; kaynak basıldığı hâlde "belgelerde yok" dendiyse 3. katman çalışmıştır.
 
 Sonra ölçüme bağla: değerlendirme setindeki 33 sorunun **8'i kasıtlı olarak
-cevaplanamaz**. Reddetme doğruluğu taban çizgisinde **%87.5**. Bu, "bazen bilmiyorum
-diyor" değil, ölçülmüş bir davranıştır.
+cevaplanamaz**. Reddetme doğruluğu deponun varsayılan yapılandırmasında
+**%100.0** (kalibre edilmemiş yalnız-vektör hâlinde %87.5 idi). Bu, "bazen
+bilmiyorum diyor" değil, ölçülmüş bir davranıştır.
 
 ### 7.4 (c) İnterneti kapat, aynı soruları tekrarla
 
@@ -754,7 +764,7 @@ Demo bitince Wi-Fi'ı geri açmayı unutma.
 | --- | --- | --- |
 | Yetersiz | 0-7 | Testler kırık ya da hiç yok. Ölü kod, debug `print`'leri, yoruma alınmış bloklar duruyor. Her şey tek dosyada. |
 | Gelişmekte | 8-12 | Testler geçiyor ama dosya ayrımı zayıf; isimler tutarsız; yorumlar kodu tekrar ediyor. |
-| Yeterli | 13-16 | 67 test geçiyor. Katmanlar ayrık (parçalama / depolama / getirme / istem / boru hattı / arayüz). İsimler tutarlı, ölü kod yok, `src/` içinde koşulsuz `print` yok. |
+| Yeterli | 13-16 | Tüm testler (bu depoda 145) geçiyor. Katmanlar ayrık (parçalama / depolama / getirme / istem / boru hattı / arayüz). İsimler tutarlı, ölü kod yok, `src/` içinde koşulsuz `print` yok. |
 | Örnek | 17-20 | Yorumlar "neden"i açıklıyor (reddedilen alternatif, dolanılan hata). Hata mesajları çözümü de söylüyor. Yeni test eklenmiş. Kritik sınır durumları (boş belge, uyumsuz boyut, bozuk indeks) kodda yakalanıyor. CI yeşil. |
 
 ### 8.4 Dokümantasyon -- 15 puan
@@ -806,7 +816,7 @@ Aşağıdakilerin hepsi sağlanmalı:
       ölçümler, sınırlar, öğrenilenler) hepsi dolu.
 - [ ] Ölçüm tablosunda en az **iki** yapılandırma satırı var ve sayılar kendi
       `eval/results.jsonl` koşularından geliyor.
-- [ ] `python -m pytest tests/ -q` -- 67 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
 - [ ] `src/foundry_rag/` altında `verbose` bayrağına bağlı olmayan debug `print` yok;
       `TODO` / `FIXME` kalmadı.
 - [ ] Kod GitHub'da; `git status` temiz; Actions sekmesinde CI yeşil.
@@ -827,8 +837,8 @@ kişi için üç madde ekle. Bir sonraki adım için birkaç somut yön:
 | Yön | Neden ilginç | Nereden başlanır |
 | --- | --- | --- |
 | Daha büyük sohbet modeli | `qwen2.5-0.5b` Türkçede zayıf; `qwen3-1.7b` (~1490 MB) veya `qwen3-4b` (~3083 MB) belirgin fark yaratır | `FRAG_CHAT_MODEL=qwen3-1.7b`, sonra aynı eval'i koştur |
-| Hibrit arama | Kosinüs benzerliği özel isimlerde ve sayılarda zayıftır | `retrieval.py` içine anahtar kelime skorunu ekleyip harmanla |
-| Yeniden sıralama (re-rank) | Top-20 getirip ilk 4'ü modelle yeniden sıralamak MRR'ı yükseltir | `search()` çağrısını iki aşamalı hale getir |
+| Sorgu genişletme / yeniden yazma | Kötü ifade edilmiş soru kötü sonuç verir; soruyu modelle yeniden yazmak recall'u artırabilir | `pipeline.py`, `RagPipeline.retrieve()` |
+| Yeniden sıralama (re-rank) | Top-20 getirip ilk 4'ü modelle yeniden sıralamak MRR'ı yükseltir | `hybrid_search()` çağrısını iki aşamalı hale getir |
 | Ölçek | Kaba kuvvet arama ~100 bin parçaya kadar uygundur | Yaklaşık en yakın komşu (ANN) indeksleri araştır |
 
 Devam etmesen bile depoyu arşivleme: iş görüşmelerinde "çalıştırılabilir ve ölçülmüş"

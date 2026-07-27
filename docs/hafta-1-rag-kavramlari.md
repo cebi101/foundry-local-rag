@@ -338,7 +338,7 @@ Cevabın sonunda şu not bulunur: `(Not: Foundry Local kurulu olmadığı için 
 | Ölçüt | Geçer |
 |---|---|
 | Çalıştırma | `ingest`, `ask`, `info` üçü de hatasız çalıştı; `info` 8 belge / 54 parça gösteriyor |
-| Skor okuma | Öğrenci `benzerlik: 0.159` sayısının ne olduğunu (kosinüs benzerliği) ve neden 0.15 eşiğiyle karşılaştırıldığını söyleyebiliyor |
+| Skor okuma | Öğrenci `anlam 0.159` sayısının ne olduğunu (kosinüs benzerliği), `guven` skorundan farkını ve `guven` değerinin neden `0.30` eşiğiyle karşılaştırıldığını söyleyebiliyor |
 | Mimari cevabı | Yazılı cevap `Backend` soyut sınıfını, üç zorunlu metodu ve `create_backend()` fabrikasını adıyla anıyor |
 | Kanıt | Cevap, `pipeline.py` içinde backend adının geçmediği gözlemine dayanıyor |
 | Sınır farkındalığı | Öğrenci `hashing` backend'inin anlamsal değil kelime/karakter eşleşmesi yaptığını ve bunun neden zayıf olduğunu bir örnekle söyleyebiliyor |
@@ -371,9 +371,9 @@ Cevabın sonunda şu not bulunur: `(Not: Foundry Local kurulu olmadığı için 
 5. Şu üç durumu ayrı ayrı işaretleyin:
    - **Doğru cevap:** Cevaplanabilir soruya, doğru kaynaktan cevap geldi.
    - **Doğru reddetme:** Cevaplanamaz soruya `Bu bilgi elimdeki belgelerde yok.` cevabı geldi.
-   - **Yanlış pozitif:** Cevaplanamaz soru için sistem yine de bir parça getirdi ve cevap üretti. Bu durumda **en yüksek benzerlik skorunu not edin** -- muhtemelen 0.15 eşiğinin hemen üstündedir.
+   - **Yanlış pozitif:** Cevaplanamaz soru için sistem yine de bir parça getirdi ve cevap üretti. Bu durumda **en yüksek `guven` skorunu not edin** -- muhtemelen varsayılan `0.30` eşiğinin hemen üstündedir.
 6. Yarım sayfalık bir analiz yazın. Şu soruları cevaplayın:
-   - Yanlış pozitif aldıysanız, `FRAG_MIN_SIMILARITY` değerini yükseltmek bunu çözer miydi? Deneyin: `python -m app.cli --backend hashing --min-similarity 0.25 ask "<soru>"`. Eşiği yükseltmenin bedeli ne oldu -- daha önce doğru cevaplanan sorulardan biri kaybedildi mi?
+   - Yanlış pozitif aldıysanız, `FRAG_MIN_SIMILARITY` değerini yükseltmek bunu çözer miydi? Deneyin: `python -m app.cli --backend hashing --min-similarity 0.45 ask "<soru>"`. Eşiği yükseltmenin bedeli ne oldu -- daha önce doğru cevaplanan sorulardan biri kaybedildi mi?
    - `prompts.py` içindeki 2 numaralı kural olmasaydı ne olurdu?
 7. Karşılaştırma: `eval/questions.json` dosyasını açın. 33 soru vardır; 25'i cevaplanabilir, 8'i `expected_source: null` yani cevaplanamaz. Kendi cevaplanamaz sorularınızı oradaki 8 soruyla karşılaştırın -- sizinkiler yeterince zor mu?
 
@@ -412,7 +412,7 @@ Aşağıdakilerin hepsi tamam olmadan Hafta 2'ye geçilmez.
 - [ ] `python -m app.cli --backend hashing info` 54 parça / 8 belge ve `hashing-offline:512` imzasını gösteriyor
 - [ ] En az bir soru cevap ve kaynak satırıyla döndü
 - [ ] En az bir soru `Bu bilgi elimdeki belgelerde yok.` cevabını verdi
-- [ ] `python -m pytest tests/ -q` çalıştırıldı ve 67 testin hepsi geçti
+- [ ] `python -m pytest tests/ -q` çalıştırıldı ve 145 testin hepsi geçti
 
 **Kavramsal**
 

@@ -20,7 +20,7 @@ gösterebiliyor olman gerekiyor:
 | `src/foundry_rag/store.py` | `SCHEMA`, `encode_vector()`, `decode_vector()`, `VectorStore` |
 | `src/foundry_rag/backends/base.py` | `Backend` sözleşmesi: `embed()`, `embedding_dim`, `embedding_signature()` |
 | `src/foundry_rag/backends/hashing.py` | `DIM = 512`, `embed_one()` -- çevrimdışı yedek embedder |
-| `src/foundry_rag/config.py` | `Settings.top_k = 4`, `Settings.min_similarity = 0.15` |
+| `src/foundry_rag/config.py` | `Settings.top_k = 4`, `Settings.min_similarity = 0.30` |
 | `tests/test_retrieval.py` | 14 test |
 | `tests/test_store.py` | 10 test |
 | `data/docs/03-embedding-ve-vektor-arama.md` | Aynı konunun Türkçe ders notu (bilgi tabanında da var) |
@@ -205,7 +205,13 @@ Uygulamada kullanılan gerçek değerler `config.py` içindeki `Settings`'ten ge
 | Ayar | Varsayılan | Ortam değişkeni |
 |---|---|---|
 | `top_k` | `4` | `FRAG_TOP_K` |
-| `min_similarity` | `0.15` | `FRAG_MIN_SIMILARITY` |
+| `min_similarity` | `0.30` | `FRAG_MIN_SIMILARITY` |
+
+`min_similarity` tahmin edilmiş bir sayı değildir: `python eval/calibrate.py`
+33 soruluk değerlendirme setinde ızgara taraması yapar ve dengeli skoru en
+yüksek noktayı seçer. Bu hafta `search()` (yalnız vektör) üzerinden çalışıyoruz;
+uygulamanın varsayılan yolu Hafta 3'te göreceğin `hybrid_search()`'tür ve eşik
+o yol için kalibre edilmiştir.
 
 ### Top-K
 
@@ -247,19 +253,23 @@ Hiç parça eşiği geçemediyse dil modeli **hiç çağrılmıyor**.
 
 ### Ölçülmüş taban çizgisi
 
-`HashingBackend`, `top_k=4`, `min_similarity=0.15` ile `eval/evaluate.py`
-sonuçları:
+Bu haftanın konusu **yalnız vektör** aramasıdır, o yüzden taban çizgisini de
+BM25 kapalıyken alıyoruz:
 
-| Metrik | Değer |
-|---|---|
-| Recall@4 | %72.0 |
-| MRR | 0.650 |
-| Reddetme doğruluğu | %87.5 |
-| Genel doğruluk | %75.8 |
+```bash
+FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15 python eval/evaluate.py --backend hashing
+```
 
-Bu rakamlar kasıtlı olarak vasat. Gerçek embedding modeliyle karşılaştıracağın
-referans çizgisi bunlar. Şimdi not al, Hafta 3'te aynı komutu tekrar
-çalıştıracaksın.
+| Metrik | Yalnız vektör (`FRAG_HYBRID=0`, eşik `0.15`) | Deponun varsayılanı (hibrit, eşik `0.30`) |
+|---|---|---|
+| Recall@4 | %72.0 | %88.0 |
+| MRR | 0.650 | 0.793 |
+| Reddetme doğruluğu | %87.5 | %100.0 |
+| Genel doğruluk | %75.8 | %90.9 |
+
+Soldaki sütun kasıtlı olarak vasat. Gerçek embedding modeliyle ve Hafta 3'teki
+hibrit aramayla karşılaştıracağın referans çizgisi odur. Şimdi not al, Hafta
+3'te aynı komutu tekrar çalıştıracaksın.
 
 ---
 
@@ -353,7 +363,7 @@ def decode_vector(blob: bytes) -> np.ndarray:
 
 | | float32 BLOB | JSON metin |
 |---|---|---|
-| 1024 boyut için yer | 4096 bayt (boyut başına tam 4) | Sayı başına ~12-20 karakter, ~15 KB |
+| 1024 boyut için yer | 4096 bayt (boyut başına tam 4) | Sayı başına ~20 karakter, ~21 KB |
 | Okuma | `np.frombuffer` -- kopya bile yok | `json.loads` + `np.asarray` |
 | Hassasiyet | ~7 anlamlı ondalık basamak | Tam, ama işe yaramaz kadar fazla |
 | Hata riski | Yazma/okuma dtype'ı aynı olmalı | Yok |
@@ -427,7 +437,7 @@ kâğıttaki sonucunla aynı olmalı.
 - c2 vektörünü `(400, 0)` yaparsan `cos(c1, c2)` değişir mi? Neden?
 - `cos(c2, c3) = 0` çıktı. Bu iki cümlenin "hiç ilgisi yok" demek mi, yoksa
   "seçtiğimiz 2 boyutta ortak bileşenleri yok" demek mi?
-- `min_similarity = 0.15` eşiği bu üç skordan hangilerini elerdi?
+- `min_similarity = 0.30` eşiği bu üç skordan hangilerini elerdi?
 
 **Kontrol:** Kâğıttaki üç sayı ile koddan çıkan üç sayı 5 ondalık basamağa kadar
 tutuyor mu?
@@ -677,7 +687,7 @@ olcek=   1000000 en buyuk mutlak hata = 1.212174e-01
 
 **Adım 3 -- neden bu bizi ilgilendirmiyor.** Embedding vektörleri normalize
 edildikten sonra her bileşen `[-1, +1]` içinde. Kosinüs skorunda gördüğün
-oynama `1e-7` mertebesinde, `min_similarity = 0.15` eşiği ise iki ondalık
+oynama `1e-7` mertebesinde, `min_similarity = 0.30` eşiği ise iki ondalık
 basamakla çalışıyor. Aradaki mesafe beş büyüklük mertebesi.
 
 **Adım 4 -- yanlış dtype tuzağını gör.** Bu, projedeki en sinsi hata sınıfı:
@@ -868,6 +878,6 @@ Tek bir markdown dosyası (`hafta-2-teslim.md`):
 
 Hafta 3'te `HashingBackend`'i bırakıp Foundry Local SDK 1.x'i kuruyoruz:
 Python 3.12 venv, `qwen3-embedding-0.6b` (1024 boyut) ve `qwen2.5-0.5b`
-indirmesi, `scripts/doctor.py` ile ortam doğrulama. Bu haftaki taban çizgisini
-(Recall@4 %72.0 / MRR 0.650) elinin altında tut -- ilk işimiz onu yeniden
-ölçmek olacak.
+indirmesi, `scripts/doctor.py` ile ortam doğrulama. Bu haftaki yalnız-vektör
+taban çizgisini (Recall@4 %72.0 / MRR 0.650) elinin altında tut -- ilk işimiz
+onu yeniden ölçmek olacak.

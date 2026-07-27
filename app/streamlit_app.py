@@ -48,10 +48,49 @@ def index_status(db_path: Path) -> tuple[int, int, str]:
         return store.count(), len(store.sources()), store.get_meta("backend", "-") or "-"
 
 
+def render_sources(hits: list[dict]) -> None:
+    """Show retrieved passages with which retriever found each one."""
+    with st.expander(f"Kaynaklar ({len(hits)} parça)"):
+        for i, hit in enumerate(hits, start=1):
+            st.markdown(
+                f"**[{i}] {hit['citation']}** — güven `{hit['score']:.3f}` · "
+                f"anlam `{hit['dense']:.3f}` · kelime `{hit['lexical']:.2f}` · "
+                f"bulan: **{hit['matched_by']}**"
+            )
+            st.text(hit["content"])
+
+
+def render_groundedness(report: dict | None) -> None:
+    """Surface the sentence-level support audit.
+
+    The whole point of the check is that a fabricated sentence looks exactly
+    like a grounded one, so this must be visible next to the answer rather than
+    hidden behind a debug flag.
+    """
+    if not report or not report["sentences"]:
+        return
+
+    score = report["score"]
+    if score == 1.0:
+        st.success(report["summary"], icon="✅")
+        return
+
+    (st.warning if score >= 0.5 else st.error)(report["summary"], icon="⚠️")
+    with st.expander(f"Doğrulanamayan cümleler ({len(report['unsupported'])})"):
+        st.caption(
+            "Bu cümleler getirilen belgelerde doğrulanamadı — modelin kendi "
+            "ezberinden eklemiş olabileceği kısımlar bunlar."
+        )
+        for verdict in report["unsupported"]:
+            st.markdown(f"- `{verdict['score']:.2f}` {verdict['text']}")
+
+
 # -- sidebar -------------------------------------------------------------
 
 with st.sidebar:
     st.title("⚙️ Ayarlar")
+
+    base_settings = Settings.from_env()
 
     backend_choice = st.selectbox(
         "Backend",
@@ -63,12 +102,15 @@ with st.sidebar:
             "hashing: her zaman çevrimdışı yedek (dil modeli yok)."
         ),
     )
-    top_k = st.slider("Getirilecek parça (top-k)", 1, 10, 4)
-    min_similarity = st.slider("Benzerlik eşiği", 0.0, 0.9, 0.15, 0.05)
+    # Varsayilanlar Settings ile ayni olmali; aksi halde arayuz sessizce
+    # CLI'dan farkli bir esikle calisir.
+    top_k = st.slider("Getirilecek parça (top-k)", 1, 10, base_settings.top_k)
+    min_similarity = st.slider(
+        "Benzerlik eşiği", 0.0, 0.9, base_settings.min_similarity, 0.05
+    )
 
     st.divider()
 
-    base_settings = Settings.from_env()
     chunks, docs, meta_backend = index_status(base_settings.db_path)
     st.metric("İndekslenmiş parça", chunks)
     st.metric("Belge", docs)
@@ -121,11 +163,9 @@ for entry in st.session_state.history:
         st.write(entry["question"])
     with st.chat_message("assistant"):
         st.write(entry["answer"])
+        render_groundedness(entry.get("groundedness"))
         if entry["hits"]:
-            with st.expander(f"Kaynaklar ({len(entry['hits'])} parça)"):
-                for i, hit in enumerate(entry["hits"], start=1):
-                    st.markdown(f"**[{i}] {hit['citation']}** — benzerlik `{hit['score']:.3f}`")
-                    st.text(hit["content"])
+            render_sources(entry["hits"])
             st.caption(entry["timing"])
 
 question = st.chat_input("Belgelerine bir soru sor...")
@@ -140,19 +180,32 @@ if question:
                 answer = rag.answer(question)
             st.write(answer.text)
 
+            report = None
+            if answer.groundedness is not None:
+                report = {
+                    "score": answer.groundedness.score,
+                    "summary": answer.groundedness.summary(),
+                    "sentences": [v.text for v in answer.groundedness.sentences],
+                    "unsupported": [
+                        {"text": v.text, "score": v.score}
+                        for v in answer.groundedness.unsupported
+                    ],
+                }
+            render_groundedness(report)
+
             hits = [
                 {
                     "citation": hit.record.citation,
                     "score": hit.score,
+                    "dense": hit.dense_score,
+                    "lexical": hit.lexical_score,
+                    "matched_by": hit.matched_by,
                     "content": hit.record.content,
                 }
                 for hit in answer.hits
             ]
             if hits:
-                with st.expander(f"Kaynaklar ({len(hits)} parça)"):
-                    for i, hit in enumerate(hits, start=1):
-                        st.markdown(f"**[{i}] {hit['citation']}** — benzerlik `{hit['score']:.3f}`")
-                        st.text(hit["content"])
+                render_sources(hits)
             else:
                 st.caption("Eşik üstünde ilgili parça bulunamadı.")
 
@@ -163,7 +216,13 @@ if question:
             st.caption(timing)
 
             st.session_state.history.append(
-                {"question": question, "answer": answer.text, "hits": hits, "timing": timing}
+                {
+                    "question": question,
+                    "answer": answer.text,
+                    "hits": hits,
+                    "timing": timing,
+                    "groundedness": report,
+                }
             )
         except BackendError as exc:
             st.error(str(exc))

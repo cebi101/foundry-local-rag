@@ -24,19 +24,19 @@ cd ~/Desktop/foundry-local-rag
 source .venv/bin/activate
 python --version                 # 3.11 veya üstü olmalı
 python scripts/doctor.py
-python -m pytest tests/ -q       # 67 test, hepsi geçmeli
+python -m pytest tests/ -q       # 145 test, hepsi geçmeli
 python -m app.cli info           # Hafta 3'ten kalan indeks
 ```
 
-Hafta 3'ün tabloları (`hashing`, `top_k=4`, `min_similarity=0.15`) bu haftanın
-karşılaştırma zeminidir:
+Hafta 3'ün tabloları (`hashing`, `top_k=4`, deponun varsayılan hibrit getirmesi,
+`min_similarity=0.30`) bu haftanın karşılaştırma zeminidir:
 
 | Metrik | Değer |
 | --- | --- |
-| Recall@4 | %72.0 |
-| MRR | 0.650 |
-| Reddetme doğruluğu | %87.5 |
-| Genel doğruluk | %75.8 |
+| Recall@4 | %88.0 |
+| MRR | 0.793 |
+| Reddetme doğruluğu | %100.0 |
+| Genel doğruluk | %90.9 |
 
 `eval/results.jsonl` dosyasını silme; bu hafta yanına yeni koşular ekleyeceksin.
 
@@ -64,7 +64,8 @@ Sorgu akışının tamamı (`RagPipeline.answer()`, `pipeline.py`):
 ```
 soru
   -> backend.embed([soru])[0]                 embedding modeli
-  -> search(store, vektor, top_k, min_similarity)
+  -> hybrid_search(records, matrix, vektor, query_text=soru, bm25=...,
+                   top_k, min_similarity, lexical_scale)   kosinus + BM25, RRF
   -> hits bos mu?  EVET -> NO_CONTEXT_ANSWER dondur, MODELI HIC CAGIRMA
                    HAYIR
   -> build_messages(soru, hits, language)     system + user mesaji
@@ -473,14 +474,14 @@ python eval/evaluate.py --backend foundry
 
 Yeniden indeksleme atlanamaz: vektör uzayı 512 boyuttan 1024 boyuta geçiyor.
 
-3. Karşılaştırma tablosunu doldur (`top_k=4`, `min_similarity=0.15`, üretim kapalı):
+3. Karşılaştırma tablosunu doldur (`top_k=4`, `min_similarity=0.30`, üretim kapalı):
 
 | Metrik | `hashing-offline` | `foundry-local` | Fark |
 | --- | --- | --- | --- |
-| Recall@4 | %72.0 | | |
-| MRR | 0.650 | | |
-| Reddetme doğruluğu | %87.5 | | |
-| Genel doğruluk | %75.8 | | |
+| Recall@4 | %88.0 | | |
+| MRR | 0.793 | | |
+| Reddetme doğruluğu | %100.0 | | |
+| Genel doğruluk | %90.9 | | |
 | Ortalama süre / soru | | | |
 
 4. Aynı iki koşuyu `--generate` ile tekrarla ve **ayrı bir tabloya** yaz. Neden ayrı:
@@ -506,8 +507,10 @@ python eval/evaluate.py --backend foundry --generate
      örtüşmesi yoksa benzerlik yoktur. `qwen3-embedding-0.6b` ise 1024 boyutlu,
      100+ dilde eğitilmiş bir modeldir.
    - Ters yönü de ara: `foundry` koşusunda **bozulan** soru var mı? Varsa neden?
-     (İpucu: `min_similarity=0.15` eşiği iki modelde aynı anlama gelmez; skor
-     dağılımları farklıdır.)
+     (İpucu: `min_similarity=0.30` eşiği iki modelde aynı anlama gelmez; skor
+     dağılımları farklıdır. Eşik `hashing` skorları üzerinde kalibre edildi --
+     gerçek embedding modeline geçince `python eval/calibrate.py` ile yeniden
+     kalibre edilmesi gerekir.)
    - Reddetme doğruluğu beklediğin gibi mi değişti? Daha iyi bir embedder,
      cevaplanamaz sorulara **daha yüksek** skor da verebilir; bu eşiği aşarsa
      reddetme düşer.
@@ -569,8 +572,8 @@ python eval/evaluate.py --backend foundry --generate --min-similarity 0.0
 
 | İstem | `min_similarity` | Reddetme doğruluğu | Genel doğruluk | Anahtar kelime |
 | --- | --- | --- | --- | --- |
-| 5 kural (özgün) | 0.15 | | | |
-| Kural 2 çıkarılmış | 0.15 | | | |
+| 5 kural (özgün) | 0.30 | | | |
+| Kural 2 çıkarılmış | 0.30 | | | |
 | 5 kural (özgün) | 0.0 | | | |
 | Kural 2 çıkarılmış | 0.0 | | | |
 
@@ -681,7 +684,7 @@ streamlit run app/streamlit_app.py
 2. Kenar çubuğundaki üç kontrolü tanı (`app/streamlit_app.py`):
    - **Backend** seçimi: `auto` / `foundry` / `hashing`
    - **Getirilecek parça (top-k)**: 1-10, varsayılan 4
-   - **Benzerlik eşiği**: 0.0-0.9, adım 0.05, varsayılan 0.15
+   - **Benzerlik eşiği**: 0.0-0.9, adım 0.05, varsayılan `Settings.min_similarity` (0.30)
    - Metrikler: indekslenmiş parça, belge sayısı, indeksin backend'i
    - **Belgeleri yeniden indeksle** düğmesi -- `ingest()` çağırır, sonra
      `st.cache_resource.clear()` ile pipeline önbelleğini boşaltır
@@ -703,7 +706,7 @@ streamlit run app/streamlit_app.py
 | 1 | Sistem çevrimdışı çalışıyor | Kenar çubuğundaki backend ve indeks metrikleri | `foundry-local (chat=..., embed=..., dim=1024)` |
 | 2 | Doğru cevap + kaynak | Cevabı `data/docs/` içinde net geçen bir soru | Cevap + "Kaynaklar" açılır bloğu, benzerlik skorları |
 | 3 | Reddetme | `eval/questions.json` içinden bir `u..` sorusu | "Bu bilgi elimdeki belgelerde yok." |
-| 4 | Bir ayarın etkisi | Eşiği 0.15'ten 0.5'e çek, aynı soruyu tekrar sor | Daha az parça veya reddetme |
+| 4 | Bir ayarın etkisi | Eşiği 0.30'dan 0.6'ya çek, aynı soruyu tekrar sor | Daha az parça veya reddetme |
 | 5 | Denetlenebilirlik | "Kaynaklar" bloğunu aç, alıntılanan parçanın tam metnini göster | Parça metni + `citation` |
 
 6. Demoyu bir arkadaşına 5 dakikada anlat. Takıldığı ilk yeri not et; bu, Hafta 6'daki
@@ -731,7 +734,7 @@ Aşağıdakilerin hepsi sağlanmalı:
 - [ ] A4.4 ve A4.5 tabloları dolu.
 - [ ] `eval/results.jsonl` içinde bu haftadan en az **6 koşu** kaydı var.
 - [ ] `prompts.py` üzerindeki geçici A4.4 değişikliği **geri alınmış** ve
-      `python -m pytest tests/ -q` 67 testle yeşil.
+      `python -m pytest tests/ -q` 145 testle yeşil.
 - [ ] Streamlit demosu 5 adımıyla hazır.
 
 ---

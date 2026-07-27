@@ -473,10 +473,23 @@ Kontrol edeceğin üç şey:
    id'si `-generic-gpu` ile bitiyorsa hızlandırılmış build çalışıyor; `-generic-cpu`
    ile bitiyorsa CPU build'i seçilmiş demektir.
 
+> **Embedding modelinde `-generic-cpu` görmen normaldir, hata değildir.** Apple
+> Silicon'da `qwen3-embedding-0.6b`'nin `-generic-gpu` varyantı vektörün içine
+> Inf/NaN yazıyor; hata da modelde değil, SDK'nın JSON serileştiricisinde patlıyor
+> ("positive and negative infinity cannot be written as valid JSON"). Bu yüzden
+> `backends/foundry.py` içindeki `_embedding_device_default()` macOS arm64'te
+> `device="auto"` iken **embedding için bilerek CPU varyantını seçer**. `embed()`
+> ayrıca bu hatayı yakalayıp tek seferlik CPU'ya geçiş yapar. Zorlamak istersen
+> `FRAG_DEVICE=gpu`, kalıcı olarak kapatmak istersen `FRAG_DEVICE=cpu`.
+> Bu kural yalnızca embedding modeli içindir; sohbet modelinin varyantını Foundry
+> Local kendi seçer.
+
 > **Açık hata: #858 / #895.** GPU execution provider doğru kaydolsa bile bazen yalnızca
 > CPU varyantları görünüyor ve sessizce yavaş build çalışıyor. Fark edilmesinin tek
 > yolu bu satırı okumak; bu yüzden `describe_variant()` fonksiyonu `load()` sonrası
-> `model.id` ve `execution_provider` değerlerini yazdırıyor.
+> `model.id` ve `execution_provider` değerlerini yazdırıyor. Bu madde **sohbet
+> modeli** için geçerlidir — embedding tarafındaki CPU seçimi yukarıda anlatıldığı
+> gibi kasıtlıdır.
 
 ### 6.3 İndeksi kontrol et
 
@@ -533,9 +546,8 @@ sonrakilerden yavaştır.
 modeli tarafından yazılır, **kaynaklar ve zamanlama bloğunun biçimi aynıdır**:
 
 ```
-Foundry Local ile bu cevabı bir dil modeli yazar. SDK yöneticisi başlatıldığında
-servis otomatik olarak ayağa kalkar, gerekli model indirilir ve belleğe
-yüklenir. [02-foundry-local.md]
+SDK yöneticisi başlatıldığında servis otomatik olarak ayağa kalkar, gerekli
+model indirilir ve belleğe yüklenir. [02-foundry-local.md]
 
 (Not: Foundry Local kurulu olmadığı için bu cevap bir dil modeli tarafından yazılmadı; belgelerden doğrudan alıntılandı.)
 
@@ -787,7 +799,8 @@ Sonra bölüm 3'ten devam et.
 | `Backend: hashing-offline` yazıyor | `auto` yedeğe düştü | `--backend foundry` ile gerçek sebebi gör, sonra `doctor.py` |
 | `Indeks farkli bir embedding modeliyle olusturulmus` | Backend değişti, indeks eski | `python -m app.cli ingest` |
 | `Veritabani bos. Once belgeleri indeksle` | Hiç indeksleme yapılmamış | `python -m app.cli ingest` |
-| Model id'si `-generic-cpu` ile bitiyor | GPU varyantı görünmüyor (#858 / #895) | Bilinen açık hata; çalışır ama yavaştır |
+| Sohbet modelinin id'si `-generic-cpu` ile bitiyor | GPU varyantı görünmüyor (#858 / #895) | Bilinen açık hata; çalışır ama yavaştır |
+| Embedding modelinin id'si `-generic-cpu` ile bitiyor | Kasıtlı: GPU varyantı Apple Silicon'da Inf/NaN üretiyor (`_embedding_device_default()`) | Bir şey yapma. Zorlamak istersen `FRAG_DEVICE=gpu` |
 | Cevap yazıldıktan sonra `IndexError` | Streaming döngüsü son boş chunk'ta patlıyor (#905) | Bu depoda korumalı: `if not chunk.choices: continue` |
 | Model yüklendi ama tuhaf davranıyor | İndirme sırasında uyku → bozuk önbellek (#909 / #906) | `rm -rf ~/.foundry/cache/models` |
 | `katalog bos dondu` | İlk çalıştırmada internet yok | Ağa bağlan |

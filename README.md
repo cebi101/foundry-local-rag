@@ -98,6 +98,11 @@ değişikliğini yakalayamaz.
 
 ### Ölçülen etki
 
+33 soruluk set, `top_k=4`. Her iki eksende birden iyileşme — recall, reddetmeden
+çalınarak elde edilmiş değil.
+
+**Çevrimdışı `hashing` backend** (CI'da çalışan, bağımlılıksız yedek):
+
 | | Dense-only, tahmini eşik | Hibrit + kalibre | |
 |---|---|---|---|
 | Recall@4 | %72.0 | **%88.0** | +16 puan |
@@ -105,8 +110,24 @@ değişikliğini yakalayamaz.
 | Reddetme doğruluğu | %87.5 | **%100.0** | +12.5 puan |
 | **Genel doğruluk** | **%75.8** | **%90.9** | **+15.1 puan** |
 
-Çevrimdışı `hashing` backend, 33 soruluk set, `top_k=4`. Her iki eksende birden
-iyileşme — recall'u reddetmeden çalmadan.
+**Gerçek `foundry` backend** (`qwen3-embedding-0.6b`, 1024 boyut, macOS M-series):
+
+| | Değer |
+|---|---|
+| Recall@4 | **%96.0** |
+| MRR | **0.960** |
+| Reddetme doğruluğu | **%100.0** |
+| **Genel doğruluk** | **%97.0** |
+| Ortalama getirme süresi | 0.33 sn |
+
+> **Eşik modele bağlıdır.** Optimum `min_similarity` hashing için `0.30`,
+> Foundry embedding modeli için `0.40` çıktı. Kodda varsayılan `0.30` (testler ve
+> CI çevrimdışı backend kullanıyor). Foundry Local kullanıyorsan:
+> ```bash
+> export FRAG_MIN_SIMILARITY=0.40
+> ```
+> Bilgi tabanını veya modeli değiştirdiğinde `python eval/calibrate.py` ile
+> yeniden kalibre et. Bu, projenin en çok tekrarlanan dersidir.
 
 ---
 

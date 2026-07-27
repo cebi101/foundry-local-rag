@@ -23,7 +23,7 @@ cd ~/Desktop/foundry-local-rag
 source .venv/bin/activate
 python --version          # 3.11 veya üstü olmalı
 python scripts/doctor.py
-python -m pytest tests/ -q   # 67 test, hepsi geçmeli
+python -m pytest tests/ -q   # 145 test, hepsi geçmeli
 ```
 
 `python --version` çıktısı `3.9.6` diyorsa venv aktif değil ya da venv sistem
@@ -67,9 +67,16 @@ data/docs/*.md
 Sorgu adımları, `RagPipeline.retrieve()`:
 
 ```
-soru -> backend.embed([soru])[0] -> search(store, vektör, top_k, min_similarity)
-     -> list[SearchHit]  (her biri: ChunkRecord + skor)
+soru -> backend.embed([soru])[0]
+     -> hybrid_search(records, matrix, vektör, query_text=soru, bm25=...,
+                      top_k, min_similarity, lexical_scale)
+        (kosinüs + BM25, RRF ile birleştirilir)
+     -> list[SearchHit]  (her biri: ChunkRecord + guven/anlam/kelime skorlari)
 ```
+
+`settings.hybrid = False` iken BM25 kurulmaz ve aynı fonksiyon yalnızca vektör
+sıralamasıyla çalışır. Salt vektör arayan bağımsız `search(store, ...)`
+fonksiyonu da durur; testlerde ve kıyaslamalarda kullanılır.
 
 Bu hafta dokunacağın dosyalar:
 
@@ -77,7 +84,7 @@ Bu hafta dokunacağın dosyalar:
 | --- | --- |
 | `src/foundry_rag/chunking.py` | `Chunk`, `chunk_text()`, `chunk_document()`, `with_heading_prefix()` |
 | `src/foundry_rag/store.py` | `VectorStore`, `encode_vector()`, `decode_vector()`, şema |
-| `src/foundry_rag/retrieval.py` | `cosine_similarity()`, `search()`, `SearchHit` |
+| `src/foundry_rag/retrieval.py` | `cosine_similarity()`, `search()`, `hybrid_search()`, `SearchHit` |
 | `src/foundry_rag/pipeline.py` | `ingest()`, `RagPipeline`, `IngestReport` |
 | `src/foundry_rag/config.py` | `Settings` ve `FRAG_*` ortam değişkenleri |
 | `eval/evaluate.py` | Recall@K, MRR, reddetme doğruluğu |
@@ -384,14 +391,19 @@ python -m app.cli --backend hashing ingest
 python eval/evaluate.py --backend hashing
 ```
 
-Beklenen (ölçülmüş taban çizgisi, `top_k=4`, `min_similarity=0.15`):
+Beklenen (deponun varsayılanı: hibrit getirme, `top_k=4`,
+`min_similarity=0.30`):
 
 | Metrik | Değer |
 | --- | --- |
-| Recall@4 | %72.0 |
-| MRR | 0.650 |
-| Reddetme doğruluğu | %87.5 |
-| Genel doğruluk | %75.8 |
+| Recall@4 | %88.0 |
+| MRR | 0.793 |
+| Reddetme doğruluğu | %100.0 |
+| Genel doğruluk | %90.9 |
+
+Karşılaştırma için yalnız-vektör hâli (`FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15
+python eval/evaluate.py --backend hashing`): Recall@4 %72.0 / MRR 0.650 /
+reddetme %87.5 / genel %75.8.
 
 2. `src/foundry_rag/pipeline.py` içinde şu satırı bul:
 
@@ -426,7 +438,7 @@ zaten test ediyor; geri almayı unutursan test kırmızı yanar.
 
 | Yapılandırma | Recall@4 | MRR | Reddetme doğruluğu | Genel doğruluk |
 | --- | --- | --- | --- | --- |
-| Başlık öneki AÇIK (`with_heading_prefix()`) | %72.0 | 0.650 | %87.5 | %75.8 |
+| Başlık öneki AÇIK (`with_heading_prefix()`) | %88.0 | 0.793 | %100.0 | %90.9 |
 | Başlık öneki KAPALI (`c.text`) | ? | ? | ? | ? |
 
 6. `eval/evaluate.py` çıktısındaki **BAŞARISIZ SORULAR** bölümünü iki koşu için
@@ -458,8 +470,8 @@ gerek yok**. Bir kez indeksle, üç kez ölç:
 python -m app.cli --backend hashing ingest        # bir kez
 
 python eval/evaluate.py --backend hashing --min-similarity 0.0
-python eval/evaluate.py --backend hashing --min-similarity 0.15
-python eval/evaluate.py --backend hashing --min-similarity 0.4
+python eval/evaluate.py --backend hashing --min-similarity 0.30
+python eval/evaluate.py --backend hashing --min-similarity 0.5
 ```
 
 Tabloyu doldur:
@@ -467,8 +479,12 @@ Tabloyu doldur:
 | `min_similarity` | Recall@4 | MRR | Reddetme doğruluğu | Genel doğruluk |
 | --- | --- | --- | --- | --- |
 | 0.0 | ? | ? | ? | ? |
-| 0.15 (varsayılan) | %72.0 | 0.650 | %87.5 | %75.8 |
-| 0.4 | ? | ? | ? | ? |
+| 0.30 (varsayılan) | %88.0 | 0.793 | %100.0 | %90.9 |
+| 0.5 | ? | ? | ? | ? |
+
+> Eşiği kendin taramak yerine `python eval/calibrate.py` de aynı ızgarayı
+> otomatik gezer. Varsayılan `0.30` oradan çıkmıştır; bu alıştırma o sonucu
+> elle yeniden üretmen içindir.
 
 Sonra iki eğriyi tek grafikte çiz. Eksen: x = `min_similarity`, y = yüzde;
 iki seri: Recall@4 ve reddetme doğruluğu. Matplotlib kurulu değilse tabloyu
@@ -476,9 +492,10 @@ ASCII bar olarak çizmen de yeterli.
 
 Cevaplaman gereken sorular:
 
-- Eşik 0.0 iken reddetme doğruluğu neden düşüyor? `retrieval.py` içindeki `search()`
-  fonksiyonunda hangi satır bunu belirliyor?
-- Eşik 0.4 iken Recall neden düşüyor? Kaybedilen sorular hangileri?
+- Eşik 0.0 iken reddetme doğruluğu neden düşüyor? `retrieval.py` içindeki
+  `hybrid_search()` fonksiyonunda hangi satır bunu belirliyor?
+  (İpucu: `confidence = max(dense, saturate(lexical, lexical_scale))`)
+- Eşik 0.5 iken Recall neden düşüyor? Kaybedilen sorular hangileri?
 - `pipeline.py`'de `hits` boş dönerse ne oluyor? (`RagPipeline.answer()` içinde
   `NO_CONTEXT_ANSWER` dönen dalı bul.) Modelin hiç çağrılmaması neden önemli?
 - Bu üç eşikten hangisini **bir hastane bilgi asistanı** için seçerdin? Hangisini
@@ -502,10 +519,15 @@ python -m app.cli --backend hashing ask "RAG kısaltması hangi üç adımdan ge
 
 ```
 Kaynaklar:
-  [1] 01-rag-nedir.md > <bölüm başlığı>  (benzerlik: 0.412)
+  [1] 01-rag-nedir.md > <bölüm başlığı>
+      guven 0.512 | anlam 0.159 | kelime 16.80 | bulan: ikisi
   ...
   getirme: 12 ms | uretim: 0.03 sn
 ```
+
+`guven` cevap/reddetme kararında kullanılan skordur -- `anlam` (kosinüs) ile
+doyurulmuş `kelime` (BM25) skorunun büyüğü. `bulan` sütunu parçayı hangi
+aramanın getirdiğini söyler: `anlam`, `kelime` ya da `ikisi`.
 
 2. `eval/questions.json` içinden **5 soru** seç. En az biri `u01`-`u08` arasından,
    yani cevaplanamaz bir soru olsun.
@@ -513,7 +535,7 @@ Kaynaklar:
    görmek için `top_k=1` ile tek tek bakabilir ya da `python -m app.cli info` ile
    dosyayı bulup açabilirsin.
 
-| Soru id | Sıra | Kaynak (`citation`) | Benzerlik | İlgili mi? (E/H) | Not |
+| Soru id | Sıra | Kaynak (`citation`) | `guven` | İlgili mi? (E/H) | Not |
 | --- | --- | --- | --- | --- | --- |
 | q01 | 1 | | | | |
 | q01 | 2 | | | | |
@@ -525,14 +547,16 @@ Kaynaklar:
 5. Şu iki durumu ayrı ayrı ara ve birer örnek bul:
    - **Doğru dosya, yanlış parça:** `expected_source` top-4'te (yani Recall için
      "başarılı") ama getirilen parça soruyu cevaplamıyor.
-   - **Yüksek skor, alakasız içerik:** benzerlik 0.15'in üstünde ama içerik ilgisiz.
+   - **Yüksek skor, alakasız içerik:** `guven` 0.30'un üstünde ama içerik ilgisiz.
 6. Bulduğun her örnek için tek cümlelik hipotez yaz: bu neden oldu? Parça çok mu
    kısa, başlık mı yanıltıcı, `HashingBackend` kelime örtüşmesine mi takıldı?
 
 > `HashingBackend` semantik bir embedder **değildir**; kelime ve karakter n-gram
 > örtüşmesine bakar. Bu yüzden eş anlamlıları ve yeniden ifade edilmiş soruları
-> kaçırır. Taban çizgisinin %72'de kalması bilerek böyledir --
-> `qwen3-embedding-0.6b` ile karşılaştırma yapabilmek için bir zemin lazım.
+> kaçırır. Hibrit getirme bu açığın bir kısmını BM25 ile kapatıyor (yalnız
+> vektörde %72.0, hibritte %88.0), ama tavan hâlâ düşük -- taban çizgisinin
+> burada kalması bilerek böyledir; `qwen3-embedding-0.6b` ile karşılaştırma
+> yapabilmek için bir zemin lazım.
 
 **Teslim:** 20 satırlık işaretleme tablosu + Precision@4 + iki örnek ve hipotezleri.
 
@@ -546,7 +570,7 @@ Aşağıdakilerin hepsi sağlanmalı:
       ve `embedding_signature` satırı boş değil.
 - [ ] Kendi bilgi tabanın (`data/mydocs.db`) ayrıca indekslenmiş ve sorulara cevap veriyor.
 - [ ] `python -m app.cli ask "..."` ilgili kaynakları benzerlik skorlarıyla listeliyor.
-- [ ] `python -m pytest tests/ -q` -- 67 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
 - [ ] `docs/hafta-3-sonuclarim.md` içinde A3.3 ve A3.4 tabloları dolu.
 - [ ] `eval/results.jsonl` içinde bu haftadan en az **4 koşu** kaydı var
       (taban çizgisi + başlık öneki kapalı + üç eşik koşusundan kalanlar).

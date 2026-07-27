@@ -9,14 +9,16 @@ Belgeyi okurken iki dosyayı yanında açık tut:
 - `src/foundry_rag/pipeline.py` — iki ana akışın tamamı burada
 - `src/foundry_rag/store.py` — veritabanı şeması ve vektör serileştirme burada
 
-Kütüphane katmanı on bir modülden oluşur ve hiçbiri 350 satırı geçmez (yorumlar
-dahil). Güncel büyüklükleri görmek için:
+Kütüphane katmanı on dört modülden oluşur (`src/foundry_rag/` altında on,
+`backends/` altında dört). En büyüğü `backends/foundry.py` (~400 satır, yorumlar
+dahil); geri kalanların hiçbiri 350 satırı geçmez. Güncel büyüklükleri görmek
+için:
 
 ```bash
 wc -l src/foundry_rag/*.py src/foundry_rag/backends/*.py | sort -rn
 ```
 
-En büyük üçü sırasıyla `pipeline.py`, `backends/foundry.py` ve `turkish.py`'dir;
+En büyük üçü sırasıyla `backends/foundry.py`, `pipeline.py` ve `turkish.py`'dir;
 en küçükleri `backends/base.py` ile `__init__.py`.
 
 ---
@@ -262,6 +264,7 @@ Tek bir `Settings` dataclass'ı, tüm ayarlanabilir değerler. Ortam değişkenl
 | `backend` | `auto` | `FRAG_BACKEND` |
 | `chat_model` | `qwen2.5-0.5b` | `FRAG_CHAT_MODEL` |
 | `embedding_model` | `qwen3-embedding-0.6b` | `FRAG_EMBEDDING_MODEL` |
+| `device` | `auto` | `FRAG_DEVICE` |
 | `temperature` | `0.1` | `FRAG_TEMPERATURE` |
 | `max_tokens` | `600` | `FRAG_MAX_TOKENS` |
 | `check_groundedness` | `True` | `FRAG_CHECK_GROUNDEDNESS` |
@@ -280,9 +283,10 @@ Settings.from_env() -> Settings     # ortamdan oku, yoksa varsayilani kullan
 settings.validate() -> None         # bozuk ayarda hemen ValueError
 ```
 
-`validate()` altı şeyi kontrol eder: `chunk_size > 0`, `chunk_overlap >= 0`,
+`validate()` yedi şeyi kontrol eder: `chunk_size > 0`, `chunk_overlap >= 0`,
 `chunk_overlap < chunk_size`, `top_k > 0`, `-1 <= min_similarity <= 1`,
-`backend in {auto, foundry, hashing}`. Bunlardan en kritik olanı üçüncüsü:
+`backend in {auto, foundry, hashing}`, `device in {auto, cpu, gpu}`.
+Bunlardan en kritik olanı üçüncüsü:
 `chunk_overlap >= chunk_size` olursa parçalama ilerlemez, sonsuz döngüye girer.
 
 **Neden ayrı duruyor:** Deney yapmak tek satır değişiklik olsun diye. `top_k`
