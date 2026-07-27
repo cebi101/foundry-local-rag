@@ -75,9 +75,13 @@ ağdan indirilir. Sunum yapacaksan indirmeleri önceden yap.
 
 macOS'ta hızlandırma ONNX Runtime'ın **WebGPU** execution provider'ı üzerinden gider
 (Dawn → Metal). CoreML **değil**, Apple Neural Engine **değil**. Aksini söyleyen blog
-yazıları yanıltıyor. Kurulum sonrası `~/.foundry/ep/webgpu-ep/` klasöründe
+yazıları yanıltıyor. Kurulum sonrası `~/.foundry_local_rag/ep/webgpu-ep/` klasöründe
 `libonnxruntime_providers_webgpu.dylib` dosyasını görürsün; bu, doğru yolda olduğunun
 kanıtıdır.
+
+> Dizin adı `.foundry` değil `.foundry_local_rag`: Foundry Local önbelleği
+> `app_name`'e göre ayırır ve bu projenin `app_name` değeri
+> `foundry_local_rag`'dir (`backends/foundry.py`). Ayrıntısı bölüm 8.2'de.
 
 ---
 
@@ -426,8 +430,8 @@ Sohbet modelinin `ingest` sırasında **inmemesi** normaldir:
 `FoundryBackend._ensure_chat_client()` tembeldir, sohbet modelini ilk soruya kadar
 yüklemez.
 
-Modeller `~/.foundry/cache/models` altına iner. Hiçbir modelde EULA/lisans onay kapısı
-yok; hepsi MIT veya Apache-2.0.
+Modeller `~/.foundry_local_rag/cache/models` altına iner. Hiçbir modelde EULA/lisans
+onay kapısı yok; hepsi MIT veya Apache-2.0.
 
 > **Uyku moduna dikkat.** İndirme sürerken Mac uykuya geçerse bozuk model önbelleği
 > kalabiliyor ve önbellek bütünlük doğrulaması yok (açık hatalar: Foundry-Local #909,
@@ -557,7 +561,7 @@ Kaynaklar:
 
   getirme: 0 ms | uretim: 0.00 sn
 
-Kaynaklilik: %50 (1/2 cumle dayanakli) -- 1 cumle bağlamda doğrulanamadı
+Kaynaklilik: %50 (1/2 cumle dayanakli) -- 1 cumle bağlamda doğrulanamadı  [mod: generative]
   [!] (0.19) (Not: Foundry Local kurulu olmadığı için bu cevap bir dil modeli...
       ^ Bu cumleler getirilen belgelerde dogrulanamadi. Modelin kendi ezberinden eklemis olabilecegi kisimlar bunlar.
 ```
@@ -731,27 +735,32 @@ içinde, repo etkilenmez.
 
 ### 8.2 Model önbelleğini ve çalışma zamanını sil
 
-Foundry Local her şeyi `~/.foundry` altında tutar:
+Foundry Local önbelleği **`app_name`'e göre ayırır.** Bu projenin `app_name`
+değeri `foundry_local_rag`'dir (`backends/foundry.py` içinde sabit), dolayısıyla
+bu projenin indirdiği her şey `~/.foundry_local_rag` altındadır:
 
 | Yol | İçerik |
 |---|---|
-| `~/.foundry/cache/models/` | İndirilen model dosyaları (GB'larca olabilir) |
-| `~/.foundry/ep/webgpu-ep/` | WebGPU execution provider kütüphanesi |
-| `~/.foundry/logs/` | Günlük dosyaları |
-| `~/.foundry/foundry.config.json` | Yapılandırma (önbellek yolu, servis ayarları) |
+| `~/.foundry_local_rag/cache/models/` | İndirilen model dosyaları (GB'larca olabilir) |
+| `~/.foundry_local_rag/ep/webgpu-ep/` | WebGPU execution provider kütüphanesi |
+| `~/.foundry_local_rag/logs/` | Günlük dosyaları |
 
-Önce ne kadar yer kapladığına bak, sonra sil:
+`~/.foundry` dizinini de görebilirsin: başka bir `app_name` kullanan bir araç
+(ya da `foundry` CLI'ı) onu oluşturur. **Bu projenin modelleri orada değildir**,
+o yüzden sadece `~/.foundry`'yi silmek diski boşaltmaz.
+
+Önce ne kadar yer kapladıklarına bak, sonra sil:
 
 ```bash
-du -sh ~/.foundry
-rm -rf ~/.foundry
+du -sh ~/.foundry_local_rag ~/.foundry 2>/dev/null
+rm -rf ~/.foundry_local_rag
 ```
 
 **Sadece bozuk modelleri temizlemek** istiyorsan (uyku modu kaynaklı bozulma —
 Foundry-Local #909 / #906) tamamını silmene gerek yok:
 
 ```bash
-rm -rf ~/.foundry/cache/models
+rm -rf ~/.foundry_local_rag/cache/models
 ```
 
 Bir sonraki çalıştırmada modeller yeniden iner. Önbellek bütünlük doğrulaması olmadığı
@@ -783,7 +792,7 @@ Başka projelerin de kullanıyor olabileceğini unutma. Emin değilsen bırak, s
 cd ~/Desktop/foundry-local-rag
 deactivate 2>/dev/null
 rm -rf .venv data/rag.db eval/results.jsonl
-rm -rf ~/.foundry
+rm -rf ~/.foundry_local_rag
 ```
 
 Sonra bölüm 3'ten devam et.
@@ -802,7 +811,7 @@ Sonra bölüm 3'ten devam et.
 | Sohbet modelinin id'si `-generic-cpu` ile bitiyor | GPU varyantı görünmüyor (#858 / #895) | Bilinen açık hata; çalışır ama yavaştır |
 | Embedding modelinin id'si `-generic-cpu` ile bitiyor | Kasıtlı: GPU varyantı Apple Silicon'da Inf/NaN üretiyor (`_embedding_device_default()`) | Bir şey yapma. Zorlamak istersen `FRAG_DEVICE=gpu` |
 | Cevap yazıldıktan sonra `IndexError` | Streaming döngüsü son boş chunk'ta patlıyor (#905) | Bu depoda korumalı: `if not chunk.choices: continue` |
-| Model yüklendi ama tuhaf davranıyor | İndirme sırasında uyku → bozuk önbellek (#909 / #906) | `rm -rf ~/.foundry/cache/models` |
+| Model yüklendi ama tuhaf davranıyor | İndirme sırasında uyku → bozuk önbellek (#909 / #906) | `rm -rf ~/.foundry_local_rag/cache/models` |
 | `katalog bos dondu` | İlk çalıştırmada internet yok | Ağa bağlan |
 | Streamlit'te ikinci `initialize()` çökmesi | SDK singleton'ı iki kez başlatılıyor | Bu depoda korumalı: `if FoundryLocalManager.instance is None` |
 

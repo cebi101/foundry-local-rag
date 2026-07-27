@@ -11,8 +11,10 @@ Bu hafta iki iş yapılır: RAG'in ne olduğunu kavramsal olarak öğrenmek ve k
 Hafta sonunda aşağıdakilerin hepsini yapabiliyor olmalısınız. Her madde ölçülebilir bir davranıştır, "anlamak" değildir.
 
 - [ ] RAG'in üç adımını (retrieve, augment, generate) sırasıyla yazabilmek ve her adımın bu depodaki hangi fonksiyona karşılık geldiğini dosya adıyla birlikte söyleyebilmek.
-- [ ] "Halüsinasyon" kelimesini, dil modelinin uydurma davranışını anlatan somut bir örnekle tanımlayabilmek ve bu depodaki hangi iki mekanizmanın (benzerlik eşiği + sistem istemi kuralı) buna karşı koyduğunu göstermek.
+- [ ] "Halüsinasyon" kelimesini, dil modelinin uydurma davranışını anlatan somut bir örnekle tanımlayabilmek ve bu depodaki hangi üç mekanizmanın (benzerlik eşiği, sistem istemi kuralı, kaynaklılık denetimi) buna karşı koyduğunu göstermek.
 - [ ] RAG ile fine-tuning arasındaki üç farkı (maliyet, güncelleme kolaylığı, kaynak gösterebilme) sayabilmek.
+- [ ] Projenin dört ayırt edici parçasını (Türkçe morfoloji, hibrit getirme, kaynaklılık denetimi, eşik kalibrasyonu) dosya adıyla eşleştirmek ve her birinin hangi hataya karşı durduğunu birer cümleyle söylemek.
+- [ ] `ask` çıktısındaki `bulan:` etiketinin üç değerini (`anlam`, `kelime`, `ikisi`) hangi aramanın karşılığı olduğunu söylemek; sistemde iki ayrı getirme yöntemi çalıştığını fark etmek.
 - [ ] macOS'ta Python 3.11+ sanal ortamı kurmak ve `python scripts/doctor.py` çıktısındaki her satırın ne anlama geldiğini açıklamak.
 - [ ] Foundry Local'ın ne olduğunu ve bu projede neden `foundry` CLI'ının gerekmediğini açıklamak.
 - [ ] `python -m app.cli --backend hashing ingest` ve `ask` komutlarını çalıştırıp çıktıdaki parça sayısı, benzerlik skoru ve kaynak satırlarını yorumlamak.
@@ -67,21 +69,37 @@ Arama, `numpy` ile kaba kuvvet matris çarpımıdır. Bu ölçekte (bu depoda 54
 
 ### 2.3 Halüsinasyon ve "bilmiyorum" diyebilmek
 
-Bir RAG sisteminin en tehlikeli hatası, bilmediğini uydurmasıdır. Bu depo buna karşı **iki bağımsız savunma** kurar:
+Bir RAG sisteminin en tehlikeli hatası, bilmediğini uydurmasıdır. Bu depo buna karşı **üç bağımsız savunma** kurar. İlk ikisi uydurmayı **önler**, üçüncüsü olan biteni **denetler**.
 
 **Savunma 1 -- benzerlik eşiği (`min_similarity = 0.30`).** Getirme, hiçbir parça eşiği geçemezse boş liste döndürür. `RagPipeline.answer()` de boş listeyi görünce dil modelini hiç çağırmaz:
 
 ```python
-# src/foundry_rag/pipeline.py
+# src/foundry_rag/pipeline.py  --  RagPipeline.answer()
 if not hits:
-    return Answer(question=question, text=NO_CONTEXT_ANSWER, hits=[], grounded=False)
+    return Answer(
+        question=question,
+        text=NO_CONTEXT_ANSWER,
+        hits=[],
+        retrieval_seconds=retrieval_seconds,
+        grounded=False,
+    )
 ```
 
 `NO_CONTEXT_ANSWER` değeri `"Bu bilgi elimdeki belgelerde yok."` sabitidir (`src/foundry_rag/prompts.py`).
 
+Bu `0.30` sayısı tahmin değildir: `eval/calibrate.py` çalıştırılıp 33 soruluk değerlendirme seti üzerinde ölçülerek seçilmiştir. Öncesinde tahmin edilmiş bir `0.15` vardı. Ayrıntısı bölüm 2.5'te.
+
 **Savunma 2 -- sistem istemi.** `prompts.py` içindeki `SYSTEM_PROMPT` beş kural içerir: (1) sadece BAĞLAM bölümünü kullan, (2) cevap bağlamda yoksa aynen "Bu bilgi elimdeki belgelerde yok." de, (3) her iddianın kaynağını köşeli parantezle belirt, (4) kısa yaz, (5) cevabı belirtilen dilde ver.
 
-İkinci savunma birincisi başarısız olduğunda devreye girer: eşiği geçen ama aslında ilgisiz bir parça geldiğinde model yine de "bilmiyorum" diyebilmelidir. A1.4 alıştırmasında bu ikisinin nerede yeterli, nerede yetersiz kaldığını göreceksiniz.
+İkinci savunma birincisi başarısız olduğunda devreye girer: eşiği geçen ama aslında ilgisiz bir parça geldiğinde model yine de "bilmiyorum" diyebilmelidir.
+
+**Savunma 3 -- kaynaklılık denetimi (`src/foundry_rag/groundedness.py`).** İlk iki savunma da modelin isteme uymasına güvenir. Uymazsa kimse fark etmez. Bu yüzden cevap üretildikten **sonra** her cümlesi, getirilen parçalarla karşılaştırılır ve desteklenmeyen cümleler işaretlenir. `RagPipeline.answer()` bunu `groundedness.check(text, hits)` ile çağırır; `Settings.check_groundedness` varsayılan olarak açıktır. `ask` çıktısında şu satır olarak görünür:
+
+```
+Kaynaklilik: %83 (5/6 cumle dayanakli) -- 1 cumle bağlamda doğrulanamadı
+```
+
+A1.4 alıştırmasında bu savunmaların nerede yeterli, nerede yetersiz kaldığını göreceksiniz.
 
 ### 2.4 Foundry Local nedir
 
@@ -109,9 +127,9 @@ Bu projenin kullandığı modeller:
 | Rol | Alias | Boyut / not |
 |---|---|---|
 | Embedding | `qwen3-embedding-0.6b` | 1024 boyutlu vektör, 32K bağlam, 100+ dil, indirme ~520-541 MB |
-| Sohbet | `qwen2.5-0.5b` | ~735 MB (gpu) / ~862 MB (cpu); grounded cevaplama için zayıftır |
+| Sohbet | `qwen2.5-0.5b` | ~735 MB (gpu) / ~862 MB (cpu); **Türkçe üretimde kullanılamaz** -- aşağıya bakın |
 
-Varsayılanlar `src/foundry_rag/config.py` içindeki `Settings` sınıfındadır. Daha iyi cevap kalitesi için `FRAG_CHAT_MODEL=qwen3-1.7b` (~1490 MB) veya `qwen3-4b` (~3083 MB) kullanılabilir; bu Hafta 1'in konusu değildir.
+Varsayılanlar `src/foundry_rag/config.py` içindeki `Settings` sınıfındadır. `qwen2.5-0.5b` bu makinede Türkçe sorularda dejenere tekrar döngüsüne giriyor ("kendinden ve kendinden ve kendinden...") ve tek bir soru 346 saniye sürüyor. Dikkat edilecek nokta şudur: aynı soruda **getirme kusursuzdu** (güven 0.741, doğru parça 1. sırada); bozuk olan yalnızca üretimdi. Kaynaklılık denetleyicisi bunu kendiliğinden yakaladı: 15 cümlenin 0'ı dayanaklı. Daha iyi cevap kalitesi için `FRAG_CHAT_MODEL=qwen3-1.7b` (~1490 MB) veya `qwen3-4b` (~3083 MB) kullanılabilir; bu Hafta 1'in konusu değildir.
 
 Açık hatalar (bunları bilerek çalışın):
 
@@ -120,6 +138,49 @@ Açık hatalar (bunları bilerek çalışın):
 | `microsoft/Foundry-Local` **#905** | Microsoft'un kendi RAG tutorial'ındaki streaming döngüsü son boş chunk'ta `IndexError` ile çöker | `foundry.py` içinde `if not getattr(chunk, "choices", None): continue` |
 | **#858 / #895** | GPU execution provider doğru kaydolsa bile bazen sadece CPU varyantları görünür; sessizce yavaş build çalışır | `describe_variant()` `load()` sonrası model id + execution provider yazdırır |
 | **#909 / #906** | İndirme sırasında uyku modu bozuk model önbelleği bırakabilir; bütünlük doğrulaması yok | İndirme sırasında makineyi uyutmayın |
+| GPU embedding varyantı (bu makinede ölçüldü) | `qwen3-embedding-0.6b-generic-gpu:1` vektörde Inf/NaN üretiyor; SDK vektörü JSON'a yazarken `System.ArgumentException` ile çöküyor. Aynı modelin `-generic-cpu:1` varyantı temiz 1024 boyutlu vektör veriyor. Foundry Local varsayılan olarak bozuk olanı seçiyor | `foundry.py` içinde `_is_non_finite_failure()` hatanın imzasını tanıyıp CPU'ya geçiyor; macOS arm64'te `_embedding_device_default()` embedding modelini zaten doğrudan CPU varyantıyla açıyor. `FRAG_DEVICE=gpu` ile geçersiz kılınabilir |
+| Execution provider yazımı (bu makinede ölçüldü) | Uzak katalog API'si `WebGPUExecutionProvider`, SDK'nın okuduğu yerel önbellek `WebGpuExecutionProvider` yazıyor. Tam eşleşmeli string karşılaştırması GPU varyantını asla bulamaz | `foundry.py` içinde `_variant_provider()` küçük harfe çevirip karşılaştırıyor |
+
+### 2.5 Bu projede farklı olan ne?
+
+Tipik bir RAG öğreticisi şöyledir: tek bir vektör araması, İngilizce metin, gözle seçilmiş bir benzerlik eşiği ve "cevap güzel görünüyor" ile biten bir değerlendirme. Bu depo dört noktada bundan ayrılır.
+
+**Bu bölüm sadece haritadır.** Amacı, dördünün adını ve hangi dosyada durduğunu tanımanız. Nasıl çalıştıkları ilerleyen haftaların konusu; bu hafta ezberlemeniz gereken tek şey "hangi hataya karşı var" sütunudur.
+
+| # | Ne | Hangi hataya karşı | Kod |
+|---|---|---|---|
+| 1 | Türkçe morfoloji duyarlı normalizasyon | "belge" ile "belgelerden" ayrı kelime sayılır; Python'un `.lower()`'ı `I` harfini yanlış küçültür | `src/foundry_rag/turkish.py` |
+| 2 | Hibrit getirme (BM25 + RRF) | Vektör araması nadir birebir kelimeleri, kelime araması eş anlamlıyı kaçırır | `src/foundry_rag/lexical.py` + `hybrid_search()` -> `retrieval.py` |
+| 3 | Kaynaklılık denetimi | Doğru parça getirilse bile modelin o parçada olmayan bir cümle yazması | `src/foundry_rag/groundedness.py` |
+| 4 | Veri odaklı eşik kalibrasyonu + CI kalite kapısı | Eşiğin tahminle seçilmesi; kalite düşüşünün sessizce geçmesi | `eval/calibrate.py`, `eval/evaluate.py --gate` |
+
+**1 -- Türkçe morfoloji.** Türkçe eklemeli bir dildir: aynı kök `vektör / vektörler / vektörlerin / vektörlere` diye uzar. Ham kelimeleri karşılaştıran bir kelime araması bunları dört ayrı kelime sayar. `turkish.py` üç iş yapar: `fold_case()` Türkçe'ye özgü küçültme (`I` -> `ı`, `İ` -> `i`), `stem_word()` ek ayıklama, `expand_tokens()` ise her kelimeyi **hem yüzey biçimi hem gövde** olarak üretir. Üçüncüsü kritiktir, çünkü kural tabanlı bir gövdeleyici son ünlünün ek mi kök mü olduğunu bilemez: `belge` -> `belg`, `belgeler` -> `belge`; ikisi hiç buluşmaz. İkisini birden indeksleyince `belge={belge, belg}` ve `belgeler={belgeler, belge}` ortak `belge` üzerinden eşleşir. Gövde bir **recall arttırıcıdır**, doğruluk kaynağı değil. Ölçüm: 12 kelime ailesinin 12'sinde eşleşme, kontrol çiftlerinde (kedi~kahve, vektör~veri, model~modern, bilgi~bilek, sorgu~sormak) 0 yanlış pozitif.
+
+**2 -- Hibrit getirme.** İki arama birlikte koşar: kosinüs benzerliği (anlam) ve BM25 kelime araması (`BM25Index`, `k1=1.5`, `b=0.75`). İki **sıralama** `reciprocal_rank_fusion(..., k=60)` ile birleştirilir. Skorlar değil sıralar toplanır: kosinüs `[-1, 1]` aralığındadır, BM25 sınırsızdır ve korpusa bağlıdır; ham skorları toplamak her korpusta yeniden ayar ister, sıralar ise kalibrasyonsuz karşılaştırılabilir. Kabul kapısı `max(anlam, saturate(kelime, 16.0))` yani **iki aramadan biri emin ise** parça kabul edilir. `ask` çıktısındaki `bulan:` etiketi hangi aramanın bulduğunu söyler -- A1.3'te buna bakacaksınız.
+
+**3 -- Kaynaklılık denetimi.** `groundedness.check(answer, hits)` cevabı cümlelere böler ve her cümlenin terimlerinin ağırlıklı recall'unu getirilen pasajlara karşı hesaplar. Yaygın kelimeler (`ve`, `bir`, `bu`) atılır, nadir kelimeler IDF ile ağır basar, pasajlarda hiç geçmeyen terim **maksimum** ağırlık alır -- uydurma tam da böyle kelime getirir. Bu bir NLI (doğal dil çıkarımı) modeli **değildir**: çelişkiyi ve ortak kelimesi olmayan eş anlamlıyı yakalayamaz. Karşılığında ikinci bir model indirmesi gerektirmez ve asıl önemli hatayı yakalar: modelin bağlamda hiç geçmeyen bir şeyi iddia etmesi. Ölçüm: doğru cevapta %100, uydurma cevapta %0.
+
+**4 -- Kalibrasyon ve kalite kapısı.** `eval/calibrate.py`, `min_similarity` x `lexical_scale` ızgarasını tarar (11 x 6 = 66 nokta) ve her nokta için recall / reddetme / genel / dengeli hesaplar. Seçim ölçütü "dengeli" = recall ile reddetmenin **harmonik** ortalamasıdır; aritmetik olsaydı her soruyu cevaplayıp hiçbirini reddetmeyen bir sistem %50 alırdı. Sorular bir kez embed edilip ızgara boyunca yeniden kullanılır. Sonuç CI'a da bağlıdır: `eval/evaluate.py --gate` metrikler eşiklerin altına düşerse çıkış kodu 1 döndürür ve derlemeyi kırar.
+
+Bu değişikliğin 33 soruluk değerlendirme setindeki karşılığı (`hashing` backend, `top_k=4`):
+
+| Ölçüt | Yalnızca vektör + tahmini eşik (0.15) | Hibrit + kalibre eşik (0.30) |
+|---|---|---|
+| Recall@4 | %72.0 | %88.0 |
+| MRR | 0.650 | 0.793 |
+| Reddetme doğruluğu | %87.5 | %100.0 |
+| Genel doğruluk | %75.8 | %90.9 |
+
+**Eşik modele bağlıdır.** Aynı 33 soru, gerçek embedding modeliyle (`foundry` backend, `qwen3-embedding-0.6b`):
+
+| min_similarity | Recall@4 | MRR | Reddetme | Genel |
+|---|---|---|---|---|
+| 0.30 | %100 | 0.973 | %62.5 | %90.9 |
+| 0.40 | %96 | 0.960 | %100.0 | %97.0 |
+
+Koddaki varsayılan `0.30`'dur, çünkü testler ve CI çevrimdışı `hashing` backend'ini kullanır. Foundry Local ile çalışacaksanız `FRAG_MIN_SIMILARITY=0.40` yapın. Buradan çıkacak ders eşiğin sayısı değil, **eşiğin bir model özelliği olduğu ve model değişince yeniden ölçülmesi gerektiğidir**.
+
+Dördünün de testi vardır: `python -m pytest tests/ -q` 163 test çalıştırır, hepsi çevrimdışıdır ve bir saniyenin altında biter.
 
 ---
 
@@ -324,7 +385,7 @@ Cevaplanabilir soru için, kaynak ve skorları içeren bir cevap:
 ```
 Kaynaklar:
   [1] 01-rag-nedir.md > RAG'in Üç Adımı
-      guven 0.512 | anlam 0.159 | kelime 16.80 | bulan: ikisi
+      guven 0.499 | anlam 0.159 | kelime 15.93 | bulan: ikisi
 ```
 
 `guven` cevap/reddetme kararında kullanılan skordur (`anlam` ile doyurulmuş `kelime` skorunun büyüğü), `anlam` kosinüs benzerliği, `kelime` BM25 skoru, `bulan` ise parçayı hangi aramanın getirdiği.
@@ -412,12 +473,12 @@ Aşağıdakilerin hepsi tamam olmadan Hafta 2'ye geçilmez.
 - [ ] `python -m app.cli --backend hashing info` 54 parça / 8 belge ve `hashing-offline:512` imzasını gösteriyor
 - [ ] En az bir soru cevap ve kaynak satırıyla döndü
 - [ ] En az bir soru `Bu bilgi elimdeki belgelerde yok.` cevabını verdi
-- [ ] `python -m pytest tests/ -q` çalıştırıldı ve 145 testin hepsi geçti
+- [ ] `python -m pytest tests/ -q` çalıştırıldı ve 163 testin hepsi geçti
 
 **Kavramsal**
 
 - [ ] Retrieve / Augment / Generate adımlarının her biri için bir fonksiyon adı + dosya yolu yazılabiliyor
-- [ ] Halüsinasyona karşı iki savunmanın (benzerlik eşiği, sistem istemi kuralı) ikisi de adıyla söylenebiliyor
+- [ ] Halüsinasyona karşı üç savunmanın (benzerlik eşiği, sistem istemi kuralı, kaynaklılık denetimi) üçü de adıyla söylenebiliyor
 - [ ] `foundry` CLI'ının bu projede neden gerekmediği açıklanabiliyor
 - [ ] SDK 0.5.1 tuzağının neden `pip` hatası vermeden oluştuğu açıklanabiliyor
 

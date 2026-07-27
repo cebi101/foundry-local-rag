@@ -134,7 +134,8 @@ def hybrid_search(
     query_text: str = "",
     bm25: BM25Index | None = None,
     top_k: int = 4,
-    min_similarity: float = 0.15,
+    # Kept in step with Settings.min_similarity, which eval/calibrate.py chose.
+    min_similarity: float = 0.30,
     rrf_k: int = RRF_K,
     lexical_scale: float = 4.0,
     candidate_multiplier: int = 5,

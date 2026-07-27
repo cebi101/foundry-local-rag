@@ -3,12 +3,14 @@
 **Faz 1: Temel Öğrenme**
 
 Bu hafta RAG boru hattının "getirme" (retrieval) yarısını sökeceğiz. Dil modeline
-hiç dokunmuyoruz. Haftanın sonunda şu üç sorunun cevabını kodun içinden
+hiç dokunmuyoruz. Haftanın sonunda şu beş sorunun cevabını kodun içinden
 gösterebiliyor olman gerekiyor:
 
 1. Bir metin nasıl sayı dizisine dönüşüyor?
 2. İki sayı dizisinin "benzer" olduğuna nasıl karar veriliyor?
 3. Bu diziler diske nasıl yazılıyor ve neden JSON değil de BLOB?
+4. Vektör araması neyi kaçırır ve BM25 bunu neden yakalar?
+5. İki farklı arama sonucu tek listede nasıl birleştirilir?
 
 ---
 
@@ -16,15 +18,21 @@ gösterebiliyor olman gerekiyor:
 
 | Dosya | Ne var içinde |
 |---|---|
-| `src/foundry_rag/retrieval.py` | `normalize()`, `cosine_similarity()`, `search()`, `SearchHit` |
+| `src/foundry_rag/retrieval.py` | `normalize()`, `cosine_similarity()`, `search()`, `reciprocal_rank_fusion()`, `hybrid_search()`, `SearchHit` |
+| `src/foundry_rag/lexical.py` | `BM25Index`, `saturate()`, `DEFAULT_K1 = 1.5`, `DEFAULT_B = 0.75` |
+| `src/foundry_rag/turkish.py` | `fold_case()`, `stem_word()`, `expand_tokens()`, `shares_root()` |
 | `src/foundry_rag/store.py` | `SCHEMA`, `encode_vector()`, `decode_vector()`, `VectorStore` |
 | `src/foundry_rag/backends/base.py` | `Backend` sözleşmesi: `embed()`, `embedding_dim`, `embedding_signature()` |
-| `src/foundry_rag/backends/hashing.py` | `DIM = 512`, `embed_one()` -- çevrimdışı yedek embedder |
-| `src/foundry_rag/config.py` | `Settings.top_k = 4`, `Settings.min_similarity = 0.30` |
+| `src/foundry_rag/backends/hashing.py` | `DIM = 512`, `tokenize()` -- çevrimdışı yedek embedder |
+| `src/foundry_rag/config.py` | `Settings.top_k = 4`, `min_similarity = 0.30`, `hybrid = True`, `lexical_scale = 16.0` |
 | `tests/test_retrieval.py` | 14 test |
 | `tests/test_store.py` | 10 test |
+| `tests/test_lexical_and_fusion.py` | 23 test (BM25, `saturate`, RRF, `hybrid_search`) |
 | `data/docs/03-embedding-ve-vektor-arama.md` | Aynı konunun Türkçe ders notu (bilgi tabanında da var) |
 | `data/docs/04-sqlite-ile-yerel-depolama.md` | SQLite ders notu |
+
+Depoda toplam 163 test var (`python -m pytest tests/ -q`). Bu haftanın doğrudan
+konusu olan üç dosya bunun 47'sini tutuyor.
 
 ## Ön koşullar
 
@@ -206,12 +214,23 @@ Uygulamada kullanılan gerçek değerler `config.py` içindeki `Settings`'ten ge
 |---|---|---|
 | `top_k` | `4` | `FRAG_TOP_K` |
 | `min_similarity` | `0.30` | `FRAG_MIN_SIMILARITY` |
+| `hybrid` | `True` | `FRAG_HYBRID` |
+| `lexical_scale` | `16.0` | `FRAG_LEXICAL_SCALE` |
 
 `min_similarity` tahmin edilmiş bir sayı değildir: `python eval/calibrate.py`
-33 soruluk değerlendirme setinde ızgara taraması yapar ve dengeli skoru en
-yüksek noktayı seçer. Bu hafta `search()` (yalnız vektör) üzerinden çalışıyoruz;
-uygulamanın varsayılan yolu Hafta 3'te göreceğin `hybrid_search()`'tür ve eşik
-o yol için kalibre edilmiştir.
+33 soruluk değerlendirme setinde `min_similarity` × `lexical_scale` ızgarasını
+(11 × 6 = 66 nokta) tarar ve dengeli skoru en yüksek noktayı seçer. `0.30`
+o taramanın argmax'ıdır. Önceki değer `0.15`'ti ve tahmindi.
+
+> **Eşik modele bağlıdır.** Aynı kalibrasyon `foundry` backend'iyle (yani
+> `qwen3-embedding-0.6b` ile) çalıştırıldığında `0.40` çıkıyor. Koddaki
+> varsayılan `0.30`, çünkü testler ve CI çevrimdışı `hashing` backend'ini
+> kullanır. Hafta 3'te Foundry Local'a geçince `FRAG_MIN_SIMILARITY=0.40`
+> yapman gerekecek.
+
+Bölüm 1-3 yalnız vektör tarafını anlatıyor (`search()`). Uygulamanın varsayılan
+yolu bölüm 4-5'te göreceğin `hybrid_search()`'tür; eşik o yol için kalibre
+edilmiştir.
 
 ### Top-K
 
@@ -253,8 +272,8 @@ Hiç parça eşiği geçemediyse dil modeli **hiç çağrılmıyor**.
 
 ### Ölçülmüş taban çizgisi
 
-Bu haftanın konusu **yalnız vektör** aramasıdır, o yüzden taban çizgisini de
-BM25 kapalıyken alıyoruz:
+Önce yalnız vektör tarafının taban çizgisini al. BM25'i kapatıyoruz ve eski
+tahmini eşiği kullanıyoruz:
 
 ```bash
 FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15 python eval/evaluate.py --backend hashing
@@ -267,13 +286,287 @@ FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15 python eval/evaluate.py --backend hashing
 | Reddetme doğruluğu | %87.5 | %100.0 |
 | Genel doğruluk | %75.8 | %90.9 |
 
-Soldaki sütun kasıtlı olarak vasat. Gerçek embedding modeliyle ve Hafta 3'teki
-hibrit aramayla karşılaştıracağın referans çizgisi odur. Şimdi not al, Hafta
-3'te aynı komutu tekrar çalıştıracaksın.
+Sağdaki sütunu üreten komut (varsayılanlar zaten hibrit + `0.30`):
+
+```bash
+python eval/evaluate.py --backend hashing
+```
+
+Soldaki sütun kasıtlı olarak vasat. Bölüm 4 ve 5, o sütunu sağdakine çeviren
+iki mekanizmayı anlatıyor. Her iki çıktıyı da not al; Hafta 3'te gerçek
+embedding modeliyle üçüncü bir sütun ekleyeceksin.
 
 ---
 
-## 4. Neden SQLite
+## 4. Kelime tabanlı arama: BM25
+
+### Vektör aramasının kör noktası
+
+Embedding modeli anlamı iyi yakalar, **nadir ve birebir** simgeleri kötü:
+bir model adı, bir hata kodu, `1536` gibi bir sayı. Sebep basit -- embedding
+tam da bu ayrıntıları bulanıklaştırarak "anlam" üretiyor. Kelime araması ise
+tersi: `1536` ile `1536`'yı eşleştirmekte kusursuz, "araba fiyatları" ile
+"otomobil ücretleri"ni eşleştirmekte çaresiz.
+
+`src/foundry_rag/lexical.py` bu ikinci yarıyı ekliyor. Sınıf `BM25Index`.
+
+### BM25 formülü, üç fikir
+
+```
+score(D, Q) = Σ  idf(q) · ( f(q,D) · (k1 + 1) )
+              q  ───────────────────────────────────────
+                 f(q,D) + k1 · (1 − b + b · |D| / avgdl)
+```
+
+Formülü ezberleme, üç fikri anla:
+
+**1. `f(q,D)` -- terim frekansı, ama doyumlu.** Bir kelime belgede ne kadar
+çok geçerse belge o kadar iyi eşleşir. Ama 10. geçiş 2. geçiş kadar bilgi
+katmaz. `k1` bu doyumu ayarlar: payda `f(q,D)`'yi de içerdiği için oran
+büyüdükçe artış yavaşlar. Düz terim frekansında böyle bir tavan yoktur ve
+tekrar eden belgeler haksız yere kazanır.
+
+```python
+DEFAULT_K1 = 1.5    # lexical.py
+```
+
+**2. `idf(q)` -- az belgede geçen terim daha bilgilendiricidir.** "ve" her
+belgede vardır ve hiçbir şey söylemez; "1536" tek belgededir ve her şeyi
+söyler. Kodda:
+
+```python
+self.idf[term] = math.log(
+    1.0 + (count - document_frequency + 0.5) / (document_frequency + 0.5)
+)
+```
+
+Baştaki `1.0 +` süs değil. O olmasaydı korpusun yarısından fazlasında geçen
+bir terim **negatif** ağırlık alırdı, yani o terimi içeren belgeleri aşağı
+iterdi. Testi: `test_scores_are_non_negative`.
+
+**3. `|D| / avgdl` -- uzunluk normalizasyonu.** Uzun belgeler kazayla daha çok
+terim eşleştirir. `b` bunu cezalandırır:
+
+```python
+DEFAULT_B = 0.75    # 0 = uzunlugu yoksay, 1 = tam normalizasyon
+```
+
+Testi: `test_longer_document_is_length_normalised` -- aynı eşleşmeye sahip bir
+belgeye dolgu metni eklenince skoru **düşüyor**.
+
+### Türkçe: `expand_tokens()`
+
+BM25'in tokenleri `foundry_rag.turkish.expand_tokens()`'dan gelir, `str.split()`
+veya `.lower()` değil. İki sebep:
+
+```python
+fold_case("IST")   # 'ıst'   -- Turkce'de dogrusu
+"IST".lower()      # 'ist'   -- Python'un varsayilani, yanlis
+```
+
+Python'un `.lower()`'i `I` -> `i` yapar. Türkçede `I` -> `ı`, `İ` -> `i`'dir.
+Bu hata, içinde I geçen her kelimede eşleşmeyi sessizce bozar.
+
+İkincisi, Türkçe eklemeli bir dil: `vektör`, `vektörler`, `vektörlerin`,
+`vektörlere`. Ham token karşılaştıran bir eşleştirici bunları dört ayrı kelime
+sayar. `expand_tokens()` her kelimeyi **hem yüzey biçimi hem gövde** olarak
+indeksler:
+
+```python
+expand_tokens("vektörlerin")   # ['vektörlerin', 'vektör']
+expand_tokens("vektör")        # ['vektör']
+expand_tokens("belgeler")      # ['belgeler', 'belge']
+expand_tokens("belge")         # ['belge', 'belg']
+```
+
+Son iki satır neden ikisini birden indekslediğimizi gösteriyor: kural tabanlı
+bir gövdeleyici son ünlünün ek mi kök mü olduğunu bilemez. `belge` gövdelenince
+`belg` olur, `belgeler` gövdelenince `belge`. Tek başına gövde kullansaydık bu
+ikisi asla buluşmazdı. İkisini birden indeksleyince ortak eleman `belge` çıkıyor.
+Gövde bir **recall arttırıcı**, doğruluk kaynağı değil.
+
+### `saturate()` -- iki farklı ölçeği aynı eşikle karşılaştırmak
+
+Burada somut bir problem var. Kosinüs benzerliği `[-1, +1]` aralığındadır. BM25
+skorunun **üst sınırı yoktur** ve aralığı korpusla birlikte kayar. `0.30` eşiği
+kosinüs için anlamlıdır, BM25 için hiçbir şey ifade etmez.
+
+Çözüm `lexical.py` içinde:
+
+```python
+def saturate(score: float, scale: float = 4.0) -> float:
+    if score <= 0:
+        return 0.0
+    return float(score / (score + scale))
+```
+
+`x / (x + s)` fonksiyonunun üç özelliği:
+
+| Özellik | Sonuç |
+|---|---|
+| Monoton artan | Sıralamayı bozmaz |
+| `saturate(0) = 0` | Eşleşme yoksa güven yok |
+| `saturate(s, s) = 0.5` | `scale` = "yarı güven" noktası |
+
+Yani `lexical_scale = 16.0` şu demek: ham BM25 skoru 16 olan bir parça 0.5
+güven alır. Tek ve yorumlanabilir bir düğme; korpus başına sihirli sabit değil.
+Testi: `test_saturate_reaches_half_at_the_scale`.
+
+### `BM25Index` arayüzü
+
+```python
+BM25Index(documents, k1=1.5, b=0.75)
+
+index.postings          # terim -> {belge indeksi: frekans}
+index.idf               # terim -> agirlik
+index.doc_lengths       # np.ndarray
+index.average_length    # float
+index.vocabulary_size   # int
+
+index.score_all(query)          -> np.ndarray  (her belge icin skor)
+index.search(query, top_k=10)   -> [(indeks, skor), ...]
+```
+
+`RagPipeline` bunu açılışta **bir kez** kuruyor (`pipeline.py`):
+
+```python
+self.matrix, self.records = self.store.load_matrix()
+self.bm25 = (
+    BM25Index([f"{r.heading}\n{r.content}" for r in self.records])
+    if self.settings.hybrid
+    else None
+)
+```
+
+Dikkat: BM25 indeksi de embedding gibi başlık + içerik üzerinden kuruluyor.
+
+---
+
+## 5. İki aramayı birleştirmek: RRF
+
+Elimizde iki sıralama var: vektör aramasının sıralaması ve BM25'in sıralaması.
+Bunları tek listeye indirmek gerekiyor.
+
+### Neden skorları toplamayalım?
+
+Akla ilk gelen `0.6 * kosinüs + 0.4 * bm25` gibi bir ağırlıklı toplam. Çalışmaz:
+
+- Kosinüs `[-1, 1]`'de, BM25 sınırsız. Toplamda BM25 her zaman ezer.
+- BM25'in aralığı korpus büyüklüğüne ve terim dağılımına bağlı. Bilgi tabanına
+  üç belge eklediğinde ağırlıkların yeniden ayarlanması gerekir.
+- Bu ayar sessizce bozulur -- kod çalışmaya devam eder, sadece sonuçlar kötüleşir.
+
+**Sıralar kalibrasyona ihtiyaç duymaz.** "Bu retriever'ın 1. sırası" ifadesi
+her retriever'da ve her korpusta aynı şeyi ifade eder. Reciprocal Rank Fusion
+(RRF) tam olarak bunu kullanır.
+
+### Formül
+
+```
+RRF(d) = Σ  1 / (k + rank_i(d))
+         i
+```
+
+`i` = sıralamalar, `rank_i(d)` = `d` belgesinin `i`'inci sıralamadaki
+1-tabanlı yeri. Belge bir sıralamada hiç yoksa o terim toplama girmez.
+
+```python
+# retrieval.py
+RRF_K = 60   # Cormack ve ark. (2009)
+
+def reciprocal_rank_fusion(rankings, k=RRF_K) -> dict[int, float]:
+    fused: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, index in enumerate(ranking, start=1):
+            fused[index] = fused.get(index, 0.0) + 1.0 / (k + rank)
+    return fused
+```
+
+`k` ne işe yarar? Tepedeki farkları **düzleştirir**. `k = 0` olsaydı 1. sıra
+`1.0`, 2. sıra `0.5` alırdı -- tek bir retriever'ın birinciliği her şeyi
+belirlerdi. `k = 60` ile 1. sıra `1/61 = 0.01639`, 2. sıra `1/62 = 0.01613`;
+aradaki fark %1.6. Böylece **iki retriever'ın da ilk beşine giren** bir belge,
+**tek bir retriever'ın birincisini** geçebilir. Testi:
+`test_smoothing_constant_flattens_top_ranks`.
+
+### `hybrid_search()` ve kapı
+
+```python
+hybrid_search(
+    records, matrix, query_vector,
+    query_text="", bm25=None, top_k=4,
+    min_similarity=0.15, rrf_k=RRF_K,
+    lexical_scale=4.0, candidate_multiplier=5,
+) -> list[SearchHit]
+```
+
+`RagPipeline.retrieve()` bunu `settings.top_k`, `settings.min_similarity` ve
+`settings.lexical_scale` ile çağırır, yani pratikte `4`, `0.30`, `16.0`.
+
+RRF sıralamayı belirler ama **kabul kararını** vermez. Onu şu satır verir:
+
+```python
+confidence = max(dense, saturate(lexical, lexical_scale))
+if confidence < min_similarity:
+    continue
+```
+
+Okunuşu: *iki retriever'dan biri emin ise parça kabul edilir.* Kesişim değil
+birleşim. Kısa bir sorguda embedding sinyali zayıf olsa bile kelime eşleşmesi
+tartışmasızsa parça kurtulur.
+
+### `SearchHit` artık dört skor taşıyor
+
+```python
+@dataclass(frozen=True)
+class SearchHit:
+    record: ChunkRecord
+    score: float            # guven = max(dense, saturate(lexical))
+    dense_score: float = 0.0
+    lexical_score: float = 0.0
+    fused_score: float = 0.0
+```
+
+Ve `matched_by` property'si hangi retriever'ın bulduğunu söyler: `"ikisi"`,
+`"kelime"` ya da `"anlam"`.
+
+### Aynı soru, iki mod
+
+CLI bunları doğrudan yazdırıyor. Önce hibrit (varsayılan):
+
+```bash
+python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
+```
+
+```
+Kaynaklar:
+  [1] 03-embedding-ve-vektor-arama.md > Kosinüs Benzerliği
+      guven 0.446 | anlam 0.344 | kelime 12.89 | bulan: ikisi
+  [2] 08-test-ve-degerlendirme.md > Birim Testleri
+      guven 0.301 | anlam 0.073 | kelime 6.87 | bulan: ikisi
+```
+
+Şimdi BM25'i kapat:
+
+```bash
+FRAG_HYBRID=0 python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
+```
+
+```
+Kaynaklar:
+  [1] 03-embedding-ve-vektor-arama.md > Kosinüs Benzerliği
+      guven 0.344 | anlam 0.344 | kelime 0.00 | bulan: anlam
+```
+
+İkinci parçayı incele. Vektör skoru `0.073` -- `0.30` eşiğinin çok altında,
+yalnız vektör modunda hiçbir koşulda gelemezdi. Ama BM25 skoru `6.87` ve
+`saturate(6.87, 16.0) = 6.87 / (6.87 + 16.0) = 0.3004`, eşiği kıl payı geçiyor.
+Kelime kanıtı bir parçayı kurtardı. Deponun `%72 -> %88` recall sıçraması işte
+bu mekanizmadan geliyor.
+
+---
+
+## 6. Neden SQLite
 
 `store.py` dosyasının başındaki tasarım notları bu kararı zaten anlatıyor. Özet:
 
@@ -347,7 +640,7 @@ CREATE TABLE IF NOT EXISTS index_meta (
 
 ---
 
-## 5. float32 BLOB, JSON değil
+## 7. float32 BLOB, JSON değil
 
 `store.py`:
 
@@ -384,7 +677,8 @@ def test_blob_size_is_four_bytes_per_dimension():
 
 # Alıştırmalar
 
-Sıra önemli. A2.1 → A2.5 birbirinin üstüne biniyor.
+Sıra önemli. A2.1 → A2.5 birbirinin üstüne biniyor; A2.6 → A2.8 bölüm 4 ve 5'i
+elle doğrular ve birbirinden bağımsızdır.
 
 ## A2.1 -- Kosinüs benzerliğini elle hesapla
 

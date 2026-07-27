@@ -97,6 +97,20 @@ class Settings:
     # call) and it is what catches the model filling gaps on its own.
     check_groundedness: bool = True
 
+    # How the answer is produced:
+    #   "generative" -> always use the chat model
+    #   "extractive" -> never use it; quote the retrieved passages instead
+    #   "auto"       -> generate, then fall back to quoting when the
+    #                   groundedness check says the generated answer is not
+    #                   supported by its own context
+    # "auto" is the default because small local models produce word salad in
+    # Turkish while retrieval on the same corpus scores 97% -- see
+    # foundry_rag/extractive.py for the measurements.
+    answer_mode: str = "auto"
+    # Groundedness below this triggers the fallback. 0.34 means "at least a
+    # third of the answer's sentences must be traceable to the context".
+    min_groundedness: float = 0.34
+
     # --- misc ---
     answer_language: str = "Türkçe"
 
@@ -120,6 +134,8 @@ class Settings:
             max_tokens=_env_int("MAX_TOKENS", 600),
             check_groundedness=_env_str("CHECK_GROUNDEDNESS", "1").strip().lower()
             not in {"0", "false", "no"},
+            answer_mode=_env_str("ANSWER_MODE", "auto").lower().strip(),
+            min_groundedness=_env_float("MIN_GROUNDEDNESS", 0.34),
             answer_language=_env_str("ANSWER_LANGUAGE", "Türkçe"),
         )
 
@@ -144,3 +160,8 @@ class Settings:
             )
         if self.device not in {"auto", "cpu", "gpu"}:
             raise ValueError(f"device must be one of auto/cpu/gpu, got {self.device!r}")
+        if self.answer_mode not in {"auto", "generative", "extractive"}:
+            raise ValueError(
+                "answer_mode must be one of auto/generative/extractive, "
+                f"got {self.answer_mode!r}"
+            )

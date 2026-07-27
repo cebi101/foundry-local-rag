@@ -35,7 +35,7 @@ source .venv/bin/activate
 
 python --version              # 3.11 veya üstü olmalı
 python scripts/doctor.py      # ortam kontrolü
-python -m pytest tests/ -q    # 145 test, hepsi geçmeli
+python -m pytest tests/ -q    # 163 test, hepsi geçmeli
 python -m app.cli info        # indekste kaç parça / kaç belge var?
 ```
 
@@ -169,13 +169,42 @@ Ayarlar: [ortam değişkeni öneki] ile geçersiz kılınır. Tam liste: `[dosya
 ## Ölçümler
 
 Değerlendirme seti: **[N] soru** ([X] cevaplanabilir + [Y] cevaplanamaz).
-Ölçüm komutu: `[komut]`
 
-| Yapılandırma | Recall@K | MRR | Reddetme doğruluğu | Genel doğruluk |
-| --- | --- | --- | --- | --- |
-| [taban çizgisi] | [ ] | [ ] | [ ] | [ ] |
-| [değişiklik 1] | [ ] | [ ] | [ ] | [ ] |
-| [değişiklik 2] | [ ] | [ ] | [ ] | [ ] |
+```bash
+[getirme ölçümü komutu]        # ör. python eval/evaluate.py --backend [B]
+[kalibrasyon komutu]           # ör. python eval/calibrate.py --backend [B]
+```
+
+**Karşılaştırma tablosu.** En az iki satır zorunlu: bir taban çizgisi ve bir değişiklik.
+
+| Yapılandırma | Recall@K | MRR | Reddetme doğruluğu | Dengeli skor | Genel doğruluk | Ort. süre |
+| --- | --- | --- | --- | --- | --- | --- |
+| [taban çizgisi] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+| [değişiklik 1] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+| [değişiklik 2] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+
+**Eşik kalibrasyonu.** Eşiği tahmin etmediğini göster: ızgara taramasının birkaç
+satırını ve seçtiğin noktayı yaz.
+
+| `lexical_scale` | `min_similarity` | Recall | Reddetme | Genel | Dengeli |
+| --- | --- | --- | --- | --- | --- |
+| [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+| [ ] | **[seçilen]** | [ ] | [ ] | [ ] | **[ ]** |
+| [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+
+Seçim ölçütü: [hangi metrik? neden?]. Seçilen değerler: `FRAG_MIN_SIMILARITY=[ ]`,
+`FRAG_LEXICAL_SCALE=[ ]`.
+
+**Kaynaklılık (cevap denetimi).** [Doğru bir cevapta yüzde kaç? Kasten bozulmuş bir
+cevapta yüzde kaç?]
+
+| Girdi | Kaynaklılık | Dayanaksız cümle |
+| --- | --- | --- |
+| [gerçek cevap] | [ ] | [ ] |
+| [uydurma cevap] | [ ] | [ ] |
+
+**Kalite kapısı.** `[kapı komutu]` CI'da çalışıyor; eşikler: Recall >= [ ],
+reddetme >= [ ], genel >= [ ]. Altına düşerse derleme kırılır.
 
 [Tablodan çıkan tek cümlelik sonuç. Hangi değişiklik işe yaradı, hangisi yaramadı?]
 
@@ -386,7 +415,7 @@ grep -rn " $" src app tests | head        # satır sonu boşlukları
 ### 4.6 Testler geçiyor
 
 ```bash
-python -m pytest tests/ -q                 # 145 test
+python -m pytest tests/ -q                 # 163 test
 python -m app.cli --backend hashing ingest
 python -m app.cli --backend hashing info
 python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
@@ -394,7 +423,7 @@ python eval/evaluate.py --backend hashing --no-save --gate
 python scripts/doctor.py
 ```
 
-Bu beş komut, `.github/workflows/ci.yml` içindeki CI adımlarının aynısıdır. Yerelde
+Bu altı komut, `.github/workflows/ci.yml` içindeki CI adımlarının aynısıdır. Yerelde
 geçiyorsa CI'da da geçer. Testler `hashing` backend ile çalışır: çevrimdışıdır, model
 indirmez ve deterministiktir.
 
@@ -404,7 +433,7 @@ Bir test kırıldıysa iki seçeneğin var: kodu düzelt ya da testin yanlış o
 ### 4.7 Teslim öncesi son kontrol
 
 - [ ] `git status` temiz.
-- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 163 test geçiyor.
 - [ ] `src/` altında `verbose` bayrağına bağlı olmayan debug `print` yok.
 - [ ] `TODO` / `FIXME` kalmadı (ya da hepsi README "Sınırlar" bölümünde yazılı).
 - [ ] Kullanılmayan import ve fonksiyon yok.
@@ -816,7 +845,7 @@ Aşağıdakilerin hepsi sağlanmalı:
       ölçümler, sınırlar, öğrenilenler) hepsi dolu.
 - [ ] Ölçüm tablosunda en az **iki** yapılandırma satırı var ve sayılar kendi
       `eval/results.jsonl` koşularından geliyor.
-- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 163 test geçiyor.
 - [ ] `src/foundry_rag/` altında `verbose` bayrağına bağlı olmayan debug `print` yok;
       `TODO` / `FIXME` kalmadı.
 - [ ] Kod GitHub'da; `git status` temiz; Actions sekmesinde CI yeşil.

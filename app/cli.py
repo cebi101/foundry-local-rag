@@ -53,7 +53,7 @@ def _print_groundedness(answer) -> None:
     report = answer.groundedness
     if report is None or not report.sentences:
         return
-    print(f"\n{report.summary()}")
+    print(f"\n{report.summary()}  [mod: {answer.mode}]")
     for verdict in report.unsupported:
         snippet = verdict.text[:110] + ("..." if len(verdict.text) > 110 else "")
         print(f"  [!] ({verdict.score:.2f}) {snippet}")

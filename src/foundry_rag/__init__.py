@@ -16,6 +16,7 @@ from __future__ import annotations
 from .backends import Backend, BackendError, BackendUnavailable, create_backend
 from .chunking import Chunk, chunk_document, chunk_text
 from .config import PROJECT_ROOT, Settings
+from .extractive import extract_answer
 from .groundedness import GroundednessReport, SentenceVerdict
 from .lexical import BM25Index
 from .pipeline import Answer, IngestReport, RagPipeline, ingest
@@ -50,6 +51,7 @@ __all__ = [
     "chunk_text",
     "cosine_similarity",
     "create_backend",
+    "extract_answer",
     "hybrid_search",
     "ingest",
     "reciprocal_rank_fusion",

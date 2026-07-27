@@ -15,6 +15,10 @@ Bu haftanın sonunda elinde şunlar olacak:
 - Sistem isteminin ve sıcaklığın davranışa etkisine dair kendi ölçümlerin
 - Sunulabilir bir Streamlit demosu
 
+Bu haftanın en önemli dersi tek cümlede: **getirmenin doğru olması üretimin
+doğru olduğu anlamına gelmez.** Bu iki yarı ayrı ayrı ölçülür, ayrı ayrı bozulur
+ve bu hafta ikisini de kendi makinende ölçeceksin.
+
 ---
 
 ## 1. Ön koşullar
@@ -24,7 +28,7 @@ cd ~/Desktop/foundry-local-rag
 source .venv/bin/activate
 python --version                 # 3.11 veya üstü olmalı
 python scripts/doctor.py
-python -m pytest tests/ -q       # 145 test, hepsi geçmeli
+python -m pytest tests/ -q       # 163 test, hepsi geçmeli
 python -m app.cli info           # Hafta 3'ten kalan indeks
 ```
 
@@ -44,6 +48,18 @@ Hafta 3'ün tabloları (`hashing`, `top_k=4`, deponun varsayılan hibrit getirme
 > yapabiliyordun, bu hafta yapamazsın. Ortam kurulumu tıkanırsa A4.1'i bitirmeden
 > diğer alıştırmalara geçme; A4.3 ve A4.4 iki backend'in karşılaştırılmasıdır.
 
+> **Eşiği daha ilk komuttan doğru kur.** `config.py`'daki varsayılan
+> `min_similarity=0.30`, **hashing** backend'i üzerinde kalibre edilmiş bir
+> değerdir (testler ve CI çevrimdışı backend kullandığı için). Foundry Local ile
+> ölçülen argmax **0.40**'tır. Bu haftaki foundry koşularında:
+>
+> ```bash
+> export FRAG_MIN_SIMILARITY=0.40
+> ```
+>
+> Neden farklı olduğunu A4.3'te ölçeceksin. `.env.example` bu iki değeri ve
+> gerekçesini zaten yazıyor.
+
 ---
 
 ## 2. Bu haftanın haritası
@@ -55,8 +71,10 @@ Hafta 3'ün tabloları (`hashing`, `top_k=4`, deponun varsayılan hibrit getirme
 | `src/foundry_rag/backends/__init__.py` | `create_backend()` -- `auto` / `foundry` / `hashing` seçimi |
 | `src/foundry_rag/prompts.py` | `SYSTEM_PROMPT` (5 kural), `build_messages()` |
 | `src/foundry_rag/pipeline.py` | `RagPipeline.answer()` ve `.stream_answer()` |
-| `src/foundry_rag/config.py` | `temperature`, `max_tokens`, `chat_model`, `embedding_model` |
-| `app/cli.py` | `chat` alt komutu -- akışlı çıktı |
+| `src/foundry_rag/groundedness.py` | `check()` -- cevabın her cümlesini getirilen pasajlarla doğrular |
+| `src/foundry_rag/extractive.py` | `extract_answer()` -- üretim çöp çıkarsa devreye giren alıntı yolu |
+| `src/foundry_rag/config.py` | `temperature`, `max_tokens`, `chat_model`, `embedding_model`, `answer_mode` |
+| `app/cli.py` | `chat` alt komutu -- akışlı çıktı; `_print_groundedness()` |
 | `app/streamlit_app.py` | Web arayüzü, `st.cache_resource` ile tekil pipeline |
 
 Sorgu akışının tamamı (`RagPipeline.answer()`, `pipeline.py`):
@@ -68,12 +86,21 @@ soru
                    top_k, min_similarity, lexical_scale)   kosinus + BM25, RRF
   -> hits bos mu?  EVET -> NO_CONTEXT_ANSWER dondur, MODELI HIC CAGIRMA
                    HAYIR
+  -> answer_mode == "extractive" ?  EVET -> extractive.extract_answer(...)
+                                    HAYIR
   -> build_messages(soru, hits, language)     system + user mesaji
   -> backend.chat(messages, temperature, max_tokens)   sohbet modeli
-  -> Answer(text, hits, retrieval_seconds, generation_seconds)
+  -> check_groundedness ise: groundedness.check(text, hits)   MODEL CAGIRMAZ
+  -> answer_mode == "auto" ve rapor.score < min_groundedness (0.34) ?
+       EVET -> uretilen cevabi AT, extract_answer(..., FALLBACK_NOTICE) koy
+               mode = "extractive-fallback"
+       HAYIR -> uretilen cevabi dondur, mode = "generative"
+  -> Answer(text, hits, retrieval_seconds, generation_seconds,
+            groundedness, mode)
 ```
 
-Bu haftanın tamamı bu şemanın son iki satırıyla ilgili.
+Hafta 3 bu şemanın ilk üç satırıyla ilgiliydi. Bu haftanın tamamı geri kalanı:
+model çağrısı, denetim ve devre kesici.
 
 ---
 
@@ -219,9 +246,9 @@ Model boyutları (canlı katalogdan doğrulandı):
 | Alias | Rol | İndirme |
 | --- | --- | --- |
 | `qwen3-embedding-0.6b` | embedding, **1024 boyut**, 32K bağlam, 100+ dil | ~520-541 MB |
-| `qwen2.5-0.5b` | sohbet (varsayılan) | ~735 MB (gpu) / ~862 MB (cpu) |
-| `qwen3-1.7b` | sohbet, daha iyi kalite | ~1490 MB |
-| `qwen3-4b` | sohbet, en iyi kalite | ~3083 MB |
+| `qwen2.5-0.5b` | sohbet (varsayılan) -- **Türkçede kullanılamaz**, bkz. `docs/TROUBLESHOOTING.md` 16. bölüm | ~735 MB (gpu) / ~862 MB (cpu) |
+| `qwen3-1.7b` | sohbet, daha büyük | ~1490 MB |
+| `qwen3-4b` | sohbet, en büyük | ~3083 MB |
 
 İlk çalıştırmada iki varsayılan model + yerel kütüphaneler toplamda yaklaşık
 **1.3 GB indirme + ~146 MB yerel kütüphane** demektir. Hiçbir modelde EULA/lisans
@@ -289,6 +316,10 @@ Varsayılanlar (`config.py`):
 | `max_tokens` | `600` | `FRAG_MAX_TOKENS` |
 | `chat_model` | `qwen2.5-0.5b` | `FRAG_CHAT_MODEL` |
 | `embedding_model` | `qwen3-embedding-0.6b` | `FRAG_EMBEDDING_MODEL` |
+| `device` | `auto` | `FRAG_DEVICE` (`auto` / `cpu` / `gpu`) |
+| `check_groundedness` | `True` | `FRAG_CHECK_GROUNDEDNESS` |
+| `answer_mode` | `auto` | `FRAG_ANSWER_MODE` (`auto` / `generative` / `extractive`) |
+| `min_groundedness` | `0.34` | `FRAG_MIN_GROUNDEDNESS` |
 | `answer_language` | `Türkçe` | `FRAG_ANSWER_LANGUAGE` |
 
 RAG'de sıcaklık **düşük** olmalıdır, ve `0.1` bu yüzden seçilmiştir. Görev "verilen
@@ -734,7 +765,7 @@ Aşağıdakilerin hepsi sağlanmalı:
 - [ ] A4.4 ve A4.5 tabloları dolu.
 - [ ] `eval/results.jsonl` içinde bu haftadan en az **6 koşu** kaydı var.
 - [ ] `prompts.py` üzerindeki geçici A4.4 değişikliği **geri alınmış** ve
-      `python -m pytest tests/ -q` 145 testle yeşil.
+      `python -m pytest tests/ -q` 163 testle yeşil.
 - [ ] Streamlit demosu 5 adımıyla hazır.
 
 ---

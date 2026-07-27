@@ -23,7 +23,7 @@ cd ~/Desktop/foundry-local-rag
 source .venv/bin/activate
 python --version          # 3.11 veya üstü olmalı
 python scripts/doctor.py
-python -m pytest tests/ -q   # 145 test, hepsi geçmeli
+python -m pytest tests/ -q   # 163 test, hepsi geçmeli
 ```
 
 `python --version` çıktısı `3.9.6` diyorsa venv aktif değil ya da venv sistem
@@ -520,7 +520,7 @@ python -m app.cli --backend hashing ask "RAG kısaltması hangi üç adımdan ge
 ```
 Kaynaklar:
   [1] 01-rag-nedir.md > <bölüm başlığı>
-      guven 0.512 | anlam 0.159 | kelime 16.80 | bulan: ikisi
+      guven 0.499 | anlam 0.159 | kelime 15.93 | bulan: ikisi
   ...
   getirme: 12 ms | uretim: 0.03 sn
 ```
@@ -570,7 +570,7 @@ Aşağıdakilerin hepsi sağlanmalı:
       ve `embedding_signature` satırı boş değil.
 - [ ] Kendi bilgi tabanın (`data/mydocs.db`) ayrıca indekslenmiş ve sorulara cevap veriyor.
 - [ ] `python -m app.cli ask "..."` ilgili kaynakları benzerlik skorlarıyla listeliyor.
-- [ ] `python -m pytest tests/ -q` -- 145 test geçiyor.
+- [ ] `python -m pytest tests/ -q` -- 163 test geçiyor.
 - [ ] `docs/hafta-3-sonuclarim.md` içinde A3.3 ve A3.4 tabloları dolu.
 - [ ] `eval/results.jsonl` içinde bu haftadan en az **4 koşu** kaydı var
       (taban çizgisi + başlık öneki kapalı + üç eşik koşusundan kalanlar).

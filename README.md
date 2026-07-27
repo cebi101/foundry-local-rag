@@ -28,7 +28,7 @@ Soru ──▶ embedding ──▶ SQLite'ta vektör arama ──▶ en ilgili K
 
 ---
 
-## Bu projeyi standart bir RAG tutorial'ından ayıran dört şey
+## Bu projeyi standart bir RAG tutorial'ından ayıran beş şey
 
 Hepsi ölçülmüş bir problemi çözüyor ve etkisi `eval/` ile kanıtlanıyor.
 
@@ -95,6 +95,33 @@ tarayıp takas eğrisini çıkarır ve noktayı veriyle seçer.
 CI'da [`--gate`](eval/evaluate.py) metrikler eşiğin altına düşerse build'i kırar.
 Testler bozuk kodu yakalar; sessizce on puan recall kaybettiren bir prompt
 değişikliğini yakalayamaz.
+
+### 5. Kaynaklılık denetimi devre kesici olarak
+
+Gerçek donanımda yapılan kontrollü bir deney, tasarımı değiştirdi:
+
+| İstem | `qwen2.5-0.5b` çıktısı |
+|---|---|
+| İngilizce sistem + İngilizce soru | Tutarlı ve doğru |
+| İngilizce sistem + Türkçe soru | Bozuk Türkçe, tek çarpık cümle |
+| Türkçe sistem + Türkçe soru | **Anlamsız kelime salatası** |
+
+Model çalışıyor; sorun Türkçe. 0.5B'lik bir model tutarlı Türkçe üretemiyor
+(`qwen3-1.7b` daha da kötüydü). Aynı korpusta **getirme %97 doğrulukta.** Yani
+zayıf halka arama değil, üretim.
+
+Bu yüzden [`extractive.py`](src/foundry_rag/extractive.py) var:
+`answer_mode="auto"` (varsayılan) önce üretir, sonra kaynaklılığı ölçer, ve
+cevap kendi bağlamı tarafından desteklenmiyorsa **belgelerden doğrudan alıntıya
+düşer.** Ölçüm zaten güvenilmez olduğunu söylediği bir metni kullanıcıya
+göstermek yerine kaynağı gösterir.
+
+```
+Kaynaklilik: %0 (0/15 cumle dayanakli)  [mod: extractive-fallback]
+```
+
+Daha kötü bir okuma deneyimi, çok daha iyi bir bilgi. `FRAG_ANSWER_MODE` ile
+`generative` veya `extractive` olarak sabitlenebilir.
 
 ### Ölçülen etki
 
@@ -228,7 +255,7 @@ Tüm ayarlar `FRAG_*` ortam değişkenleriyle geçersiz kılınabilir; bkz.
 ## Test ve değerlendirme
 
 ```bash
-python -m pytest tests/ -q             # 145 test, çevrimdışı, ~0.5 sn
+python -m pytest tests/ -q             # 163 test, çevrimdışı, ~0.3 sn
 python eval/evaluate.py                # sadece getirme kalitesi (hızlı)
 python eval/evaluate.py --generate     # cevapları da üret (yavaş)
 python eval/evaluate.py --gate         # CI kalite kapısı: regresyonda exit 1
@@ -268,6 +295,7 @@ src/foundry_rag/
   lexical.py         BM25 indeksi ve doyum fonksiyonu
   retrieval.py       Kosinüs benzerliği, RRF füzyonu, hibrit arama
   groundedness.py    Cevap denetimi — dayanaksız cümle tespiti
+  extractive.py      Alıntıya dayalı cevap ve devre kesici geri çekilmesi
   prompts.py         Sistem istemi (5 kural) ve bağlam kurulumu
   pipeline.py        ingest() ve RagPipeline.answer()
   backends/
@@ -282,7 +310,7 @@ eval/
   questions.json     33 soru (25 cevaplanabilir + 8 cevaplanamaz)
   evaluate.py        Recall@K, MRR, reddetme doğruluğu + CI kalite kapısı
   calibrate.py       Eşik taraması — takas eğrisi ve optimum nokta
-tests/               145 test (hepsi çevrimdışı, ~0.5 sn)
+tests/               163 test (hepsi çevrimdışı, ~0.3 sn)
 data/docs/           Örnek bilgi tabanı — 8 Türkçe ders notu
 docs/                Kurulum, mimari, sorun giderme + 6 haftalık müfredat
 ```

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from . import groundedness
+from . import extractive, groundedness
 from .backends import Backend, create_backend
 from .chunking import Chunk, chunk_document
 from .config import Settings
@@ -70,6 +70,9 @@ class Answer:
     grounded: bool = True
     #: per-sentence support audit, when groundedness checking is enabled
     groundedness: GroundednessReport | None = None
+    #: how this answer was produced: "generative", "extractive" or
+    #: "extractive-fallback" (generated, then rejected by the groundedness check)
+    mode: str = "generative"
 
     @property
     def sources(self) -> list[str]:
@@ -262,6 +265,20 @@ class RagPipeline:
                 grounded=False,
             )
 
+        # Pure extractive mode never touches the chat model.
+        if self.settings.answer_mode == "extractive":
+            text = extractive.extract_answer(question, hits)
+            return Answer(
+                question=question,
+                text=text,
+                hits=hits,
+                retrieval_seconds=retrieval_seconds,
+                groundedness=groundedness.check(text, hits)
+                if self.settings.check_groundedness
+                else None,
+                mode="extractive",
+            )
+
         messages = build_messages(question, hits, language=self.settings.answer_language)
         started = time.perf_counter()
         text = self.backend.chat(
@@ -278,6 +295,27 @@ class RagPipeline:
             groundedness.check(text, hits) if self.settings.check_groundedness else None
         )
 
+        # Circuit breaker. If the audit says the generated answer is not
+        # supported by the very passages it was given, showing it anyway means
+        # knowingly handing the user something measured to be untrustworthy.
+        # Quoting the sources instead is worse prose and better information.
+        if (
+            self.settings.answer_mode == "auto"
+            and report is not None
+            and report.score < self.settings.min_groundedness
+        ):
+            return Answer(
+                question=question,
+                text=extractive.extract_answer(
+                    question, hits, notice=extractive.FALLBACK_NOTICE
+                ),
+                hits=hits,
+                retrieval_seconds=retrieval_seconds,
+                generation_seconds=generation_seconds,
+                groundedness=report,
+                mode="extractive-fallback",
+            )
+
         return Answer(
             question=question,
             text=text,
@@ -285,6 +323,7 @@ class RagPipeline:
             retrieval_seconds=retrieval_seconds,
             generation_seconds=generation_seconds,
             groundedness=report,
+            mode="generative",
         )
 
     def stream_answer(self, question: str) -> Iterable[str]:

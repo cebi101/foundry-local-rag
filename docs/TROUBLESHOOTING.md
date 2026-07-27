@@ -41,6 +41,13 @@ alias'larini kontrol eder. Cikti satirlari uc isaretten biriyle baslar:
 | `foundry model list` embedding modelini gostermiyor | [12](#12-brew-install-foundrylocal-eski-surum-kuruyor) |
 | Turkce cevaplar kotu, kaynak vermiyor | [13](#13-turkce-cevap-kalitesi-dusuk) |
 | `ModuleNotFoundError: No module named 'foundry_rag'` (pytest) | [14](#14-testler-gecmiyor) |
+| `.NET number values such as positive and negative infinity cannot be written as valid JSON` | [15](#15-net-number-values-such-as-positive-and-negative-infinity-cannot-be-written-as-valid-json) |
+| Cevap ayni kelimeyi tekrar edip duruyor, dakikalarca suruyor | [16](#16-cevap-ayni-kelimeyi-tekrar-edip-duruyor--tek-soru-dakikalarca-suruyor) |
+| `Kaynaklilik: %0 (0/N cumle dayanakli)` | [17](#17-kaynaklilik-0-cikiyor) |
+| `(Not: Üretilen cevap ... belgelerden doğrudan alıntı yapıldı.)` | [17](#17-kaynaklilik-0-cikiyor) |
+| Sistem her seye cevap veriyor, "bilmiyorum" demiyor | [18](#18-reddetme-dogrulugu-cok-dusuk--sistem-her-seye-cevap-veriyor) |
+| CI'da `Kalite kapisi BASARISIZ` | [19](#19-cida-kalite-kapisi-basarisiz) |
+| Modeller gigabaytlarca yeniden iniyor | [20](#20-modeller-yeniden-iniyor) |
 
 ---
 
@@ -354,7 +361,7 @@ Iki satir ayni gorunur ama sebepleri farklidir.
 
 | Satir | `-generic-cpu` ne demek |
 | --- | --- |
-| `embedding: ...` | **Kasitli.** macOS arm64'te `device="auto"` iken proje embedding icin CPU varyantini bilerek secer (`backends/foundry.py`, `_embedding_device_default()`). Sebep: `qwen3-embedding-0.6b`'nin `-generic-gpu` varyanti bu platformda vektore Inf/NaN yaziyor ve hata SDK'nin JSON serilestiricisinde patliyor (`positive and negative infinity cannot be written as valid JSON`). `embed()` bu hatayi yakalayip tek seferlik CPU'ya da gecer. Zorlamak icin `FRAG_DEVICE=gpu`. |
+| `embedding: ...` | **Kasitli.** macOS arm64'te `device="auto"` iken proje embedding icin CPU varyantini bilerek secer (`backends/foundry.py`, `_embedding_device_default()`). Sebep: `qwen3-embedding-0.6b`'nin `-generic-gpu` varyanti bu platformda vektore Inf/NaN yaziyor. Ayrintisi ve hatanin tam metni [15. bolumde](#15-net-number-values-such-as-positive-and-negative-infinity-cannot-be-written-as-valid-json). Zorlamak icin `FRAG_DEVICE=gpu`. |
 | `chat: ...` | Muhtemelen asagidaki ust kaynak hatasi. Sohbet modelinin varyantini Foundry Local kendi secer, proje karismaz. |
 
 Yani embedding satirinda CPU gormek **bir ariza degildir**. Asagisi sohbet
@@ -953,19 +960,32 @@ Kaynaklar:
 
   getirme: 48 ms | uretim: 2.31 sn
 
-Kaynaklilik: %100 (3/3 cumle dayanakli)
+Kaynaklilik: %100 (3/3 cumle dayanakli)  [mod: generative]
 ```
 
 `guven` cevap/reddetme kararinda kullanilan skordur; `anlam` kosinus
 benzerligi, `kelime` BM25 skoru, `bulan` ise parcayi hangi aramanin getirdigi.
 Son satir `groundedness.py`'nin cumle bazli denetimidir.
 
+Sondaki `[mod: ...]` cevabin **nasil uretildigini** soyler
+(`pipeline.py`, `Answer.mode`). Uc deger alir:
+
+| `mod` | Anlami |
+| --- | --- |
+| `generative` | Cevabi sohbet modeli yazdi, kaynaklilik denetimini gecti |
+| `extractive` | `FRAG_ANSWER_MODE=extractive` acik; sohbet modeli hic cagrilmadi, cumleler belgelerden alintilandi |
+| `extractive-fallback` | Sohbet modeli yazdi ama kaynaklilik `min_groundedness` esiginin altinda kaldi, cevap atildi ve yerine alinti kondu. Bkz. [17. bolum](#17-kaynaklilik-0-cikiyor) |
+
 - **Dogru parca listede yok** -> getirme sorunu. `--top-k` degerini yukselt,
-  `--min-similarity` degerini dusur, parca boyutunu degistir.
+  `--min-similarity` degerini dusur, parca boyutunu degistir. Esigi elle
+  tahmin etme, [18. bolume](#18-reddetme-dogrulugu-cok-dusuk--sistem-her-seye-cevap-veriyor)
+  bak.
 - **Dogru parca listede var ama cevap kotu** -> uretim sorunu. Sohbet modeli
-  zayif.
+  zayif. Cevap kendini tekrar ediyorsa
+  [16. bolum](#16-cevap-ayni-kelimeyi-tekrar-edip-duruyor--tek-soru-dakikalarca-suruyor).
 - **Cevap geldi ama `Kaynaklilik` dusuk** -> model getirilen parcalarin disina
-  cikmis. `[!]` isaretli cumleleri oku; uydurma tam orada olur.
+  cikmis. `[!]` isaretli cumleleri oku; uydurma tam orada olur. Nasil
+  yorumlanacagi [17. bolumde](#17-kaynaklilik-0-cikiyor).
 
 ### Sebep 1: aslinda dil modeli hic calismiyor
 
@@ -1017,12 +1037,15 @@ Diger ayarlar (`.env.example` icinde hepsi listeli):
 | Degisken | Varsayilan | Ne zaman degistirilir |
 | --- | --- | --- |
 | `FRAG_TOP_K` | `4` | Dogru parca listeye girmiyorsa 6-8 dene |
-| `FRAG_MIN_SIMILARITY` | `0.30` | Cok sik "belgelerde yok" diyorsa dusur; uydurma yapiyorsa yukselt. Tahmin etme: `python eval/calibrate.py` ile veriden sec |
+| `FRAG_MIN_SIMILARITY` | `0.30` | Cok sik "belgelerde yok" diyorsa dusur; uydurma yapiyorsa yukselt. Tahmin etme: `python eval/calibrate.py` ile veriden sec. Foundry Local kullaniyorsan `0.40` |
 | `FRAG_HYBRID` | `1` | `0` yaparsan BM25 kapanir, yalnizca vektor aramasi kalir |
 | `FRAG_LEXICAL_SCALE` | `16.0` | BM25 skorunun 0.5 guvene karsilik geldigi nokta; `calibrate.py` bunu da tarar |
 | `FRAG_CHECK_GROUNDEDNESS` | `1` | `0` yaparsan cumle bazli kaynaklilik denetimi kapanir |
-| `FRAG_MAX_TOKENS` | `600` | Cevap ortadan kesiliyorsa yukselt |
+| `FRAG_ANSWER_MODE` | `auto` | `generative` (her zaman model), `extractive` (modeli hic cagirma, alintila) veya `auto` (uret, dayanaksizsa alintiya dus) |
+| `FRAG_MIN_GROUNDEDNESS` | `0.34` | `auto` modda alintiya dusme esigi. Uretilen cevabin kaynakliligi bunun altindaysa cevap atilir |
+| `FRAG_MAX_TOKENS` | `600` | Cevap ortadan kesiliyorsa yukselt; model tekrar donguse giriyorsa dusur |
 | `FRAG_TEMPERATURE` | `0.1` | Dusuk tutulmali; RAG'de yaratici cevap istemiyoruz |
+| `FRAG_DEVICE` | `auto` | `cpu` veya `gpu`. macOS arm64'te embedding zaten CPU'ya sabitlenir; bkz. [15. bolum](#15-net-number-values-such-as-positive-and-negative-infinity-cannot-be-written-as-valid-json) |
 | `FRAG_CHUNK_SIZE` | `900` | Parcalar konu butunlugunu bozuyorsa |
 | `FRAG_CHUNK_OVERLAP` | `150` | Sinira denk gelen bilgi kaybediliyorsa |
 
@@ -1041,15 +1064,17 @@ Cevaplanamayan sorular, sistemin "bilmiyorum" diyebilme yetenegini olcer.
 
 `HashingBackend` ile olculmus taban cizgisi (`top_k=4`):
 
-| Metrik | Yalniz vektor, `min_similarity=0.15` | Hibrit + kalibre, `min_similarity=0.30` (varsayilan) |
+| Metrik | Yalniz vektor, eski tahmini esik `0.15` | Hibrit + kalibre `0.30` (bugunku varsayilan) |
 | --- | --- | --- |
 | Recall@4 | %72.0 | %88.0 |
 | MRR | 0.650 | 0.793 |
 | Reddetme dogrulugu | %87.5 | %100.0 |
 | Genel dogruluk | %75.8 | %90.9 |
 
-Soldaki sutunu `FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15` ile tekrar uretebilirsin;
-sagdaki sutun deponun varsayilan yapilandirmasidir.
+Soldaki sutun **tarihseldir**: `0.15` bir zamanlar varsayilandi ve tahmin
+edilmisti. `FRAG_HYBRID=0 FRAG_MIN_SIMILARITY=0.15` ile tekrar uretebilirsin.
+Sagdaki sutun deponun bugunku varsayilan yapilandirmasidir ve `0.30` degeri
+`eval/calibrate.py`'nin argmax'idir.
 
 Bu sayilar **kasitli olarak vasattir**. Gercek embedding modeliyle ne kadar
 iyilestigini gormek icin referanstir. Ayni komutu Foundry Local ile calistirip
@@ -1061,6 +1086,20 @@ python eval/evaluate.py --backend foundry --generate    # cevaplari da uretir, y
 ```
 
 `--generate` olmadan yalnizca getirme olculur (hizli).
+
+Foundry Local (`qwen3-embedding-0.6b`, 1024 boyut) ile ayni set su sonuclari
+verdi:
+
+| Metrik | `min_similarity=0.30` | `min_similarity=0.40` (kalibre) |
+| --- | --- | --- |
+| Recall@4 | %100 | %96 |
+| MRR | 0.973 | 0.960 |
+| Reddetme dogrulugu | %62.5 | %100.0 |
+| Genel dogruluk | %90.9 | %97.0 |
+
+Ortalama getirme suresi 0.33 sn. Dikkat: **ayni esik iki backend'de ayni seyi
+ifade etmiyor.** Sebebi ve cozumu
+[18. bolumde](#18-reddetme-dogrulugu-cok-dusuk--sistem-her-seye-cevap-veriyor).
 
 ---
 
@@ -1150,6 +1189,593 @@ python -m pytest tests/test_pipeline.py::test_signature_mismatch_is_detected -q
 
 ---
 
+## 15. `.NET number values such as positive and negative infinity cannot be written as valid JSON`
+
+### Belirti
+
+`python -m app.cli ingest` sirasinda, embedding modeli yuklendikten hemen sonra:
+
+```
+System.ArgumentException: .NET number values such as positive and negative
+infinity cannot be written as valid JSON.
+```
+
+Proje bu hatayi yakalarsa once su satiri gorursun:
+
+```
+  [!] GPU varyanti gecersiz sayi (Inf/NaN) uretti. CPU varyantina geciliyor.
+      (Foundry Local'in WebGPU embedding varyantinda bilinen sorun;
+       kalici olarak FRAG_DEVICE=cpu kullan.)
+```
+
+Yakalayamazsa CLI su bicimde bitirir (cikis kodu **2**):
+
+```
+[backend hatasi] Embedding generation failed: System.ArgumentException: .NET number
+values such as positive and negative infinity cannot be written as valid JSON.
+```
+
+### Sebep
+
+Hata mesaji **yanlis yeri gosteriyor**. Ortada bir JSON sorunu yok. Olan sudur:
+
+1. Foundry Local `qwen3-embedding-0.6b` icin varsayilan olarak
+   `qwen3-embedding-0.6b-generic-gpu:1` varyantini secer
+   (`WebGpuExecutionProvider`).
+2. Bu varyant macOS arm64'te vektorun icine `Inf` / `NaN` yaziyor.
+3. SDK vektoru surec sinirindan gecirirken JSON'a yazmaya calisiyor. .NET'in
+   `JsonSerializer`'i sonsuzlugu yazamaz ve `System.ArgumentException` firlatir.
+
+Yani patlayan yer serilestirici, bozuk olan model varyanti. Ayni modelin
+`-generic-cpu:1` varyanti sorunsuz calisir ve temiz 1024 boyutlu vektor doner.
+
+Bu makinede canli dogrulandi (macOS 14.6 / Apple Silicon, SDK 1.2.3).
+
+### Bu depoda durum
+
+Uc ayri koruma var, hepsi `src/foundry_rag/backends/foundry.py` icinde.
+
+| Fonksiyon | Ne yapar |
+| --- | --- |
+| `_embedding_device_default()` | macOS + arm64 ise `"cpu"` doner. `device="auto"` iken embedding modeli **dogrudan** CPU varyantiyla acilir; calismayacak bir varyant icin ~540 MB bosuna inmez |
+| `_is_non_finite_failure(error)` | Hata metninde `infinity` ya da `cannot be written as valid json` geciyor mu diye bakar |
+| `FoundryBackend.embed()` | Hata bu imzaya uyuyorsa `_switch_embedding_to_cpu()` ile **tek seferlik** CPU'ya gecip yeniden dener; olcum bosa gitmez |
+
+Kod iyilesme olasiligini kapatmiyor: `FRAG_DEVICE=gpu` platform varsayilanini
+gecersiz kilar. Microsoft varyanti duzelttiginde tek satir ayarla GPU'ya
+donebilirsin.
+
+### Cozum
+
+Kalici cozum ortam degiskenidir:
+
+```bash
+export FRAG_DEVICE=cpu
+python -m app.cli ingest
+```
+
+Dogru calistigini su satirdan anlarsin (`ingest` ve `chat` zaten verbose,
+`ask` icin `-v` gerekir):
+
+```
+  embedding: qwen3-embedding-0.6b-generic-cpu [CPU / CPUExecutionProvider]
+```
+
+Hala `-generic-gpu` goruyorsan `FRAG_DEVICE` degeri okunmamis demektir;
+`env | grep FRAG_DEVICE` ile dogrula.
+
+**Onemli:** CPU'ya gecmek vektor uzayini degistirmez. Imza
+(`foundry-local:qwen3-embedding-0.6b:1024`) ayni kaldigi icin yeniden
+indekslemene gerek yoktur.
+
+### Ilgili tuzak: saglayici adinin yazimi tutarsiz
+
+Ayni model varyantini kod icinden secmeye kalkarsan ikinci bir tuzak var:
+
+| Nerede | Nasil yaziyor |
+| --- | --- |
+| Uzak katalog API'si | `WebGPUExecutionProvider` |
+| SDK'nin okudugu yerel onbellek | `WebGpuExecutionProvider` |
+
+Tam eslesmeli bir string karsilastirmasi (`provider == "WebGPUExecutionProvider"`)
+GPU varyantini **asla** bulamaz ve sessizce hicbir sey yapmaz. Depodaki
+`_variant_provider()` bu yuzden kucuk harfe cevirip alt dize arar:
+
+```python
+runtime = getattr(getattr(variant, "info", None), "runtime", None)
+return str(getattr(runtime, "execution_provider", "") or "").lower()
+```
+
+Kendi kodunda varyant secerken ayni yaklasimi kullan.
+
+### Kontrol listesi
+
+- [ ] `export FRAG_DEVICE=cpu` yapildi
+- [ ] `python -m app.cli -v ask "RAG nedir?"` ciktisinda embedding satiri `-generic-cpu`
+- [ ] `python -m app.cli info` icinde `embedding_signature` hala `...:1024`
+
+---
+
+## 16. Cevap ayni kelimeyi tekrar edip duruyor / tek soru dakikalarca suruyor
+
+### Belirti
+
+Cevap uretilmeye basliyor ama bitmiyor. Ekrana su tarzda bir sey akiyor:
+
+```
+Cevap: ... kendinden ve kendinden ve kendinden ve kendinden ve kendinden ...
+```
+
+Kaynak satirindaki sure sacma buyuklukte:
+
+```
+  getirme: 41 ms | uretim: 346.02 sn
+```
+
+Kaynaklilik denetleyicisi ayni anda alarm veriyor:
+
+```
+Kaynaklilik: %0 (0/15 cumle dayanakli) -- 15 cumle bağlamda doğrulanamadı
+```
+
+### Sebep
+
+`qwen2.5-0.5b` **Turkce'de dejenere tekrar dongusune giriyor.** 0.5 milyar
+parametreli bir modelin Turkce uretim kapasitesi yetersiz; ayni ifadeyi durma
+kosulu olusana kadar tekrarliyor ve `max_tokens` sinirina kadar token uretiyor.
+
+Bu makinede olculen degerler:
+
+| Olcum | Deger |
+| --- | --- |
+| Tek sorunun uretim suresi | 346 sn |
+| Dayanakli cumle orani | 0/15 |
+| Getirme guveni (ayni soru) | 0.741, dogru parca 1. sirada |
+
+**Kritik ayrim:** getirme mukemmeldi. Dogru parca birinci siradaydi ve guven
+skoru yuksekti. Bozuk olan yalnizca uretim. Bu yuzden `--top-k`,
+`--min-similarity` ya da parca boyutuyla oynamak bu sorunu **cozmez**.
+
+Bu, [13. bolumdeki](#13-turkce-cevap-kalitesi-dusuk) "getirme mi, uretim mi"
+ayriminin en net ornegidir.
+
+### Cozum
+
+Daha buyuk bir sohbet modeline gec:
+
+```bash
+export FRAG_CHAT_MODEL=qwen3-1.7b      # ~1490 MB
+python -m app.cli ask "RAG nedir?"
+```
+
+Model ilk soruda indirilir. Yeniden indekslemeye **gerek yok**: indeks imzasi
+(`f"{self.name}:{self.embedding_model_alias}:{self.embedding_dim}"`) yalnizca
+embedding modelini icerir, sohbet modelini icermez.
+
+Ikinci onlem, tekrar dongusunun maliyetini kesmektir:
+
+```bash
+export FRAG_MAX_TOKENS=250
+```
+
+`max_tokens` dongunun kendisini engellemez ama uretimi erken keser: 346 saniye
+yerine saniyeler icinde bozuk ciktiyi gorup teshis koyarsin. Cevaplar duzeldikten
+sonra varsayilan `600` degerine geri don, yoksa uzun cevaplar ortadan kesilir.
+
+Bellek durumun elveriyorsa `qwen3-4b` (~3083 MB) daha da iyidir; once
+[11. bolumdeki](#11-zsh-killed-bellek-yetersiz) bellek tablosunu oku.
+
+### Neden bu hatayi yakalayabildik
+
+Bunu fark ettiren sey kaynaklilik denetleyicisidir. `qwen2.5-0.5b` akici
+cumleler uretiyordu; ekrana bakarak "kotu ama calisiyor" demek mumkundu.
+`groundedness.check()` 15 cumlenin 15'ini **DAYANAKSIZ** isaretledi ve model
+degistirme karari tahmine degil olcume dayandi.
+
+```bash
+export FRAG_CHECK_GROUNDEDNESS=1     # zaten varsayilan
+```
+
+---
+
+## 17. `Kaynaklilik: %0` cikiyor
+
+### Belirti
+
+`python -m app.cli ask "..."` ciktisinin sonunda:
+
+```
+Kaynaklilik: %0 (0/6 cumle dayanakli) -- 6 cumle bağlamda doğrulanamadı
+  [!] (0.12) RAG sistemleri 2019 yılında Facebook AI tarafından tanıtılmıştır ve...
+  [!] (0.08) Bu yöntem genellikle 1536 boyutlu vektörlerle çalışır ve...
+      ^ Bu cumleler getirilen belgelerde dogrulanamadi. Modelin kendi
+        ezberinden eklemis olabilecegi kisimlar bunlar.
+```
+
+Streamlit'te ayni bilgi kirmizi bir kutu ve "Doğrulanamayan cümleler" acilir
+panelidir.
+
+### Bu sayi ne olcuyor
+
+`src/foundry_rag/groundedness.py`, cevabin **her cumlesini** getirilen
+parcalarla karsilastirir. Bir cumlenin skoru, o cumlenin icerik kelimelerinin
+**agirlikli recall**'udur: "bu cumlenin iddia ettigi her sey pasajda var mi?"
+
+Uc tasarim karari sonucu dogrudan etkiler:
+
+| Karar | Sonucu |
+| --- | --- |
+| Simetrik ortusme degil, recall | Uzun pasaj cezalandirilmaz; onemli olan cumlenin fazla sey soyleyip soylemedigi |
+| Nadir kelimeler IDF ile agir basar | "ve", "bir" paylasmak destek sayilmaz; `STOPWORDS` listesi bunlari tamamen atar |
+| Hic gorulmemis terim **maksimum** agirlik alir | Uydurma tam da baglamda gecmeyen kelime getirir; en cok o cezalandirilir |
+
+`split_sentences()` markdown isaretlerini ve `[kaynak]` etiketlerini atar, 25
+karakterden kisa parcalari hic denetlemez (iddia tasimazlar). Esik
+`SUPPORT_THRESHOLD = 0.45`: bunun altindaki cumle `DAYANAKSIZ` sayilir.
+
+Olculen davranis: dogru cevapta **%100**, kasitli uydurma cevapta **%0**.
+
+### Ne zaman ciddiye alinmali
+
+| Durum | Yorum |
+| --- | --- |
+| Cevapta kaynakta hic gecmeyen **sayi, tarih, isim** var | **Gercek uydurma.** Cumleyi ve `Kaynaklar` bloguna bak, dogrula |
+| Cevap kendini tekrar ediyor, %0 cikiyor | Model dejenere olmus. [16. bolum](#16-cevap-ayni-kelimeyi-tekrar-edip-duruyor--tek-soru-dakikalarca-suruyor) |
+| Cevap dogru ama tamamen **kendi kelimeleriyle** yazilmis | Buyuk olasilikla **yanlis alarm.** Bu denetleyici kelime ortusmesine bakar, anlama bakmaz |
+| Tek bir kisa cumle dusuk skorlu, gerisi yuksek | Genelde gecis cumlesi ("Ozetle bunlar onemlidir.") -- gormezden gelinebilir |
+
+Denetleyici **NLI degildir.** Celiskiyi yakalayamaz ("X dogrudur" ile "X
+yanlistir" ayni kelimeleri paylasir, ikisi de dayanakli gorunur) ve ortak
+kelimesi olmayan es anlamli anlatimi kacirir. Karsiliginda ikinci bir model
+indirmesi gerektirmez ve asil onemli hatayi yakalar: **modelin baglamda hic
+gecmeyen bir seyi iddia etmesi.**
+
+Skor bir **sinyaldir, hukum degil.** Dusuk skor "buna bak" demektir, "bu
+yanlis" demez.
+
+### Esigi nasil ayarlarsin
+
+Esik icin ortam degiskeni **yoktur**. Iki yol var.
+
+**1. Sabiti degistir.** `src/foundry_rag/groundedness.py`:
+
+```python
+#: below this, a sentence is reported as unsupported
+SUPPORT_THRESHOLD = 0.45
+```
+
+- Yukselt (ornegin `0.60`): daha kati, daha cok yanlis alarm.
+- Dusur (ornegin `0.30`): daha musamahali, gercek uydurmalari kacirabilir.
+
+**2. Kendi kodunda parametre gecir.** Fonksiyon esigi argüman olarak alir:
+
+```python
+from foundry_rag import groundedness
+
+report = groundedness.check(answer.text, answer.hits, threshold=0.60)
+print(report.summary())
+for verdict in report.unsupported:
+    print(verdict.label, round(verdict.score, 2), verdict.text)
+```
+
+Denetimi tamamen kapatmak icin:
+
+```bash
+export FRAG_CHECK_GROUNDEDNESS=0
+```
+
+Kapatmak yalnizca olcum yaparken mantiklidir (uretim suresini bir miktar
+kisaltir). Gunluk kullanimda acik birak: uydurma bir cumle, dayanakli bir
+cumleyle **birebir ayni gorunur**, yanindaki kaynak etiketi onu daha da
+guvenilir gosterir.
+
+### Ilgili: hic cumle denetlenmiyor
+
+```
+Denetlenecek cumle yok.
+```
+
+Cevabin tamami 25 karakterden kisa parcalardan olusuyorsa bu cikar. Bir hata
+degil; denetlenecek iddia yok demektir.
+
+---
+
+## 18. Reddetme dogrulugu cok dusuk / sistem her seye cevap veriyor
+
+### Belirti
+
+Bilgi tabaninda karsiligi olmayan bir soru soruyorsun, sistem yine de cevap
+uretiyor:
+
+```bash
+python -m app.cli ask "Kuantum bilgisayarlar RAG'i nasil hizlandirir?"
+```
+
+```
+Kaynaklar:
+  [1] 03-embedding-ve-vektor-arama.md > Tanım
+      guven 0.312 | anlam 0.312 | kelime 0.00 | bulan: anlam
+```
+
+Degerlendirme setinde ayni sorun sayiya donusur:
+
+```
+  Reddetme dogrulugu: 62.5%
+```
+
+Ters yonu de aynidir: sistem cevabini bildigi sorulara "Bu bilgi elimdeki
+belgelerde yok." diyorsa esik bu sefer fazla yuksektir.
+
+### Sebep
+
+`min_similarity` esigi **modele bagli**, ve varsayilan deger senin backend'in
+icin dogru olmayabilir.
+
+Neden: `hybrid_search()` bir parcayi kabul ederken
+`max(dense_score, saturate(lexical_score, lexical_scale))` degerini esikle
+karsilastirir. Kosinus benzerliginin dagilimi her embedding modelinde farklidir.
+Bu bilgi tabaninda olculen degerler:
+
+| Backend | Kalibre esik | Recall@4 | Reddetme | Genel |
+| --- | --- | --- | --- | --- |
+| `hashing` (cevrimdisi yedek) | **0.30** | %88.0 | %100.0 | %90.9 |
+| `foundry` (`qwen3-embedding-0.6b`) | **0.40** | %96 | %100.0 | %97.0 |
+
+Ayni bilgi tabani, ayni sorular, **farkli optimum esik**. `foundry` backend'i
+`0.30` ile calistirirsan recall %100'e cikar ama reddetme %62.5'e duser --
+tam da bu bolumun belirtisi.
+
+Koddaki varsayilan `0.30`'dur (`src/foundry_rag/config.py`), cunku testler ve CI
+cevrimdisi backend kullanir. **Foundry Local kullaniyorsan degistirmen gerekir.**
+
+### Cozum
+
+Tahmin etme, olc:
+
+```bash
+python eval/calibrate.py --backend foundry
+```
+
+`calibrate.py` `min_similarity` x `lexical_scale` izgarasini tarar
+(11 x 6 = 66 nokta) ve her nokta icin recall / reddetme / genel / dengeli
+hesaplar. Sorular **bir kez** embed edilir ve izgara boyunca yeniden kullanilir,
+bu yuzden tarama saniyeler surer.
+
+Cikti soyle biter:
+
+```
+En iyi nokta (balanced metrigine gore):
+  FRAG_MIN_SIMILARITY=0.4
+  FRAG_LEXICAL_SCALE=16.0
+
+  recall 96.0% | reddetme 100.0% | genel 97.0% | dengeli 98.0%
+```
+
+Onerilen degeri `.env` dosyasina yaz ya da export et:
+
+```bash
+export FRAG_MIN_SIMILARITY=0.40
+export FRAG_LEXICAL_SCALE=16.0
+python eval/evaluate.py --backend foundry     # dogrula
+```
+
+### Secim olcutu neden "dengeli"
+
+Varsayilan hedef `balanced`, yani recall ile reddetmenin **harmonik**
+ortalamasi. Aritmetik ortalama olsaydi, her soruyu cevaplayip hicbirini
+reddetmeyen bir sistem %50 alirdi -- yani hicbir sey yapmayan bir sistem gecer
+not alirdi. Harmonik ortalama, iki taraftan biri cokerse sifira gider.
+
+Baska bir hedef istersen:
+
+```bash
+python eval/calibrate.py --objective overall     # genel dogruluk
+python eval/calibrate.py --objective recall      # sadece recall (reddetmeyi umursama)
+python eval/calibrate.py --no-lexical-sweep      # lexical_scale sabit, sadece esigi tara
+```
+
+`--objective recall` bilerek tek tarafli bir secimdir; reddetme yetenegini
+onemsemedigin bir deney yapiyorsan kullan.
+
+### Ne zaman yeniden kalibre etmelisin
+
+- Embedding modelini degistirdiginde
+- Backend degistirdiginde (`hashing` <-> `foundry`)
+- `data/docs/` icerigini kayda deger olcude degistirdiginde
+- `chunk_size` / `chunk_overlap` degistirdiginde
+
+Bunlarin hepsi skor dagilimini kaydirir. Esik ayni kalirsa **ayni sayi artik
+baska bir sey ifade eder.**
+
+---
+
+## 19. CI'da `Kalite kapisi BASARISIZ`
+
+### Belirti
+
+GitHub Actions'ta "Retrieval quality gate" adimi kirmiziya donuyor:
+
+```
+  KALITE KAPISI
+==============================================================================
+  [GECTI] Recall@K              88.0%  (esik: 84.0%)
+  [KALDI] Reddetme dogrulugu    75.0%  (esik: 95.0%)
+  [KALDI] Genel dogruluk        81.8%  (esik: 87.0%)
+==============================================================================
+
+Kalite kapisi BASARISIZ:
+  - Reddetme dogrulugu: 75.0% < 95.0%
+  - Genel dogruluk: 81.8% < 87.0%
+
+Getirme kalitesi dustu. Ya degisikligi geri al, ya da
+  python eval/calibrate.py
+calistirip esikleri yeniden kalibre et ve dususun kasitli oldugunu dogrula.
+```
+
+Adim cikis kodu **1** dondurur ve build kirilir.
+
+### Sebep
+
+Bu bir kurulum hatasi **degil**. Getirme kalitesi gercekten dustu.
+
+Testler bozuk kodu yakalar. Bir prompt duzenlemesinin, bir `chunk_size`
+degisikliginin ya da bir esik oynamasinin sessizce on puan recall goturmesini
+yakalayamaz -- bunu ancak bir degerlendirme seti gorur. `.github/workflows/ci.yml`
+icindeki adim tam olarak sunu calistirir:
+
+```bash
+python eval/evaluate.py --backend hashing --no-save --gate
+```
+
+Esikler (`eval/evaluate.py`, `run_quality_gate()`) olculen degerlerin **biraz
+altina** konmustur, boylece gurultu build'i kirmaz ama gercek dusus kirar:
+
+| Kontrol | Bayrak | Esik | Depodaki olculen deger |
+| --- | --- | --- | --- |
+| Recall@K | `--min-recall` | 0.84 | %88.0 |
+| Reddetme dogrulugu | `--min-refusal` | 0.95 | %100.0 |
+| Genel dogruluk | `--min-overall` | 0.87 | %90.9 |
+
+### Cozum
+
+Once ayni komutu **yerelde** calistir; CI ile ayni cevrimdisi backend'i kullanir,
+model indirmez ve saniyeler surer:
+
+```bash
+python eval/evaluate.py --backend hashing --no-save --gate
+echo $?        # 0 = gecti, 1 = kaldi
+```
+
+Sonra iki yoldan birini sec.
+
+**Yol 1 -- dusus istenmiyordu: degisikligi geri al.**
+
+`BASARISIZ SORULAR` blogu hangi sorularin bozuldugunu ve ne getirildigini
+gosterir. Son degisikligini geri alip komutu tekrar calistir:
+
+```bash
+git diff                       # ne degistirdin
+git stash                      # gecici olarak kaldir
+python eval/evaluate.py --backend hashing --no-save --gate
+```
+
+Kapi `git stash` sonrasi geciyorsa sucluyu buldun.
+
+**Yol 2 -- dusus kasitliydi: yeniden kalibre et.**
+
+Ornegin `chunk_size` degistirdiysen skor dagilimi da degismistir. Once
+indeksi yeniden kur, sonra esikleri veriden sec:
+
+```bash
+python -m app.cli --backend hashing ingest
+python eval/calibrate.py --backend hashing
+```
+
+Onerilen degerleri `src/foundry_rag/config.py` icindeki varsayilanlara yaz,
+sonra kapiyi tekrar calistir. Yeni degerler kapiyi geciyorsa is bitti.
+
+**Esikleri dusurmek** son caredir ve ayri bir karardir:
+
+```bash
+python eval/evaluate.py --backend hashing --no-save --gate --min-refusal 0.90
+```
+
+Bunu yapiyorsan commit mesajinda **neden** dusurdugunu yaz. Aksi halde kapi
+zamanla anlamsizlasir: her kirildiginda esik biraz daha indirilirse kapi hicbir
+seyi korumaz.
+
+### Yapmaman gereken
+
+- Adimi `|| true` ile susturma. Ayni dosyada `Environment doctor` adimi
+  bilerek `|| true` ile calisir cunku o bilgi amaclidir; kalite kapisi degildir.
+- Testleri gecti diye kapiyi gormezden gelme. Ikisi farkli seyleri olcer.
+- Kapiyi `--backend foundry` ile calistirmaya calisma. CI cevrimdisidir ve
+  `foundry-local-sdk` **bilerek** kurulmaz; gigabaytlarca model agirligi
+  indirmemek icin.
+
+---
+
+## 20. Modeller yeniden iniyor
+
+### Belirti
+
+Daha once indirdigin modeller bastan iniyor:
+
+```
+  Downloading embedding model (qwen3-embedding-0.6b)...
+  embedding:   4.1%
+```
+
+Disk doluyor; ev dizininde birden fazla model onbellegi goruyorsun:
+
+```
+~/.foundry_local_rag/
+~/.foundry/
+```
+
+### Sebep
+
+Foundry Local model onbellegini **`app_name`'e gore ayirir.** Her `app_name`
+kendi onbellek dizinini kullanir. `app_name` degistirdiginde SDK eski dizini
+bilmez ve tum modelleri sifirdan indirir.
+
+Bu depodaki deger `src/foundry_rag/backends/foundry.py` icinde sabittir:
+
+```python
+app_name: str = "foundry_local_rag",
+```
+
+`create_backend()` bu parametreyi hic gecmez, yani proje icinden calistigin
+surece deger **degismez** ve onbellek paylasilir. Modelleri yeniden indiriyorsan
+sebebi neredeyse her zaman sudur: kendi betiginde `FoundryBackend`'i farkli bir
+`app_name` ya da `model_cache_dir` ile kurdun, ya da bir blog ornegini
+kopyalayip `app_name="foundry"` yazdin.
+
+Ikinci olasilik: onbellek gercekten eksik. Kod
+`if not getattr(model, "is_cached", False)` kontrolu yapar; onbellek dizini
+silinmis ya da baska bir kullaniciya aitse model "yok" gorunur.
+
+### Cozum
+
+1. **`app_name`'i degistirme.** Kendi betiginde de varsayilani birak:
+
+   ```python
+   from foundry_rag.backends.foundry import FoundryBackend
+
+   backend = FoundryBackend()          # app_name="foundry_local_rag"
+   ```
+
+2. Onbellegi bilerek baska yere almak istiyorsan `app_name` yerine
+   `model_cache_dir` kullan; bu deger dogrudan `Configuration`'a gecer:
+
+   ```python
+   backend = FoundryBackend(model_cache_dir="/Volumes/Disk2/foundry-cache")
+   ```
+
+   Bu yolu **her calistirmada ayni** ver. Yolu degistirmek de yeniden indirme
+   demektir.
+
+3. Diskteki onbellekleri gorup gereksizleri sil:
+
+   ```bash
+   du -sh ~/.foundry_local_rag ~/.foundry 2>/dev/null
+   ```
+
+   Silmeden once hangisinin aktif oldugundan emin ol; yanlisini silersen
+   ~1.3 GB'i tekrar indirirsin.
+
+4. Indirme sirasinda **Mac'i uyutma.** Yarim kalan indirme dogrulanmamis bir
+   onbellek birakabiliyor ve butunluk dogrulamasi yapilmiyor. Ayrintisi ve
+   `caffeinate` kullanimi [9. bolumde](#9-ilk-calistirma-cok-uzun-suruyor--internet-gerekiyor-mu).
+
+### Kontrol listesi
+
+- [ ] Kendi kodumda `app_name` parametresini gecmiyorum
+- [ ] `model_cache_dir` veriyorsam her calistirmada ayni yolu veriyorum
+- [ ] Ev dizininde tek bir model onbellegi var
+
+---
+
 ## Hangi komutu once calistirmaliyim
 
 Bir sey calismadiginda bu sirayi izle. Her adim bir sonrakinin on kosuludur.
@@ -1163,7 +1789,10 @@ flowchart TD
     C -- Hayir --> E["python -m app.cli info"]
     E --> F{"Veritabani ve parca sayisi var mi?"}
     F -- Hayir --> G["python -m app.cli ingest<br/>Bolum 6"]
-    G --> E
+    G --> G3{"'infinity ... valid JSON'<br/>hatasi cikti mi?"}
+    G3 -- Evet --> G4["export FRAG_DEVICE=cpu<br/>Bolum 15"]
+    G4 --> G
+    G3 -- Hayir --> E
     F -- Evet --> H{"embedding_signature<br/>su anki backend ile ayni mi?"}
     H -- Hayir --> G2["python -m app.cli ingest<br/>Bolum 7"]
     G2 --> E
@@ -1171,9 +1800,20 @@ flowchart TD
     I --> J{"Testler geciyor mu?"}
     J -- Hayir --> K["Bolum 14"]
     J -- Evet --> L["python -m app.cli -v ask 'RAG nedir?'"]
-    L --> M{"Cevap kaliteli mi?"}
-    M -- Hayir --> N["Bolum 13:<br/>once getirme mi uretim mi, karar ver"]
-    M -- Evet --> O["Sorun cozuldu"]
+    L --> M{"Dogru parca<br/>Kaynaklar listesinde mi?"}
+    M -- Hayir --> N["Getirme sorunu:<br/>python eval/calibrate.py<br/>Bolum 18"]
+    N --> L
+    M -- Evet --> P{"Kaynaklilik yuzdesi<br/>kac cikti?"}
+    P -- "Dusuk / %0" --> Q{"Cevap ayni ifadeyi<br/>tekrarliyor mu?"}
+    Q -- Evet --> R["export FRAG_CHAT_MODEL=qwen3-1.7b<br/>Bolum 16"]
+    R --> L
+    Q -- Hayir --> S["DAYANAKSIZ cumleleri oku,<br/>uydurma mi yanlis alarm mi<br/>Bolum 17"]
+    S --> L
+    P -- "Yuksek" --> T{"Cevaplanamaz sorulara<br/>da cevap veriyor mu?"}
+    T -- Evet --> U["python eval/calibrate.py<br/>Bolum 18"]
+    U --> L
+    T -- Hayir --> V["python eval/evaluate.py --gate<br/>ile sayiyla dogrula<br/>Bolum 19"]
+    V --> W["Sorun cozuldu"]
 ```
 
 Diyagrami goremiyorsan ayni sira duz liste olarak:
@@ -1181,10 +1821,21 @@ Diyagrami goremiyorsan ayni sira duz liste olarak:
 1. `python scripts/doctor.py` — ortam saglam mi? `[XX]` varsa once onu coz.
 2. `python -m app.cli info` — indeks var mi, hangi backend ile kurulmus?
 3. `python -m app.cli ingest` — indeks yoksa veya imza uyusmuyorsa.
+   `infinity ... valid JSON` hatasi cikarsa `export FRAG_DEVICE=cpu`
+   ([15. bolum](#15-net-number-values-such-as-positive-and-negative-infinity-cannot-be-written-as-valid-json)).
 4. `python -m pytest tests/ -q` — kod tarafi saglam mi? Hepsi gecmeli.
-5. `python -m app.cli -v ask "RAG nedir?"` — uctan uca dene, kaynaklari ve
-   yuklenen model varyantini gor.
-6. Cevap kalitesi dusukse [13. bolum](#13-turkce-cevap-kalitesi-dusuk).
+5. `python -m app.cli -v ask "RAG nedir?"` — uctan uca dene. Uc seye bak:
+   `Kaynaklar` listesi, `guven` skorlari ve son satirdaki `Kaynaklilik`.
+6. **Dogru parca gelmiyorsa** getirme sorunudur:
+   `python eval/calibrate.py` ([18. bolum](#18-reddetme-dogrulugu-cok-dusuk--sistem-her-seye-cevap-veriyor)).
+7. **Dogru parca geliyor ama kaynaklilik dusukse** uretim sorunudur:
+   cevap kendini tekrarliyorsa [16. bolum](#16-cevap-ayni-kelimeyi-tekrar-edip-duruyor--tek-soru-dakikalarca-suruyor),
+   degilse [17. bolum](#17-kaynaklilik-0-cikiyor).
+8. **Sistem bilmedigi sorulara da cevap veriyorsa** esik kalibre edilmemistir:
+   [18. bolum](#18-reddetme-dogrulugu-cok-dusuk--sistem-her-seye-cevap-veriyor).
+9. Duzelttigini sandiginda sayiyla dogrula:
+   `python eval/evaluate.py --backend hashing --no-save --gate`
+   ([19. bolum](#19-cida-kalite-kapisi-basarisiz)).
 
 ### Her sey tikandiginda: bilinen calisan yol
 
