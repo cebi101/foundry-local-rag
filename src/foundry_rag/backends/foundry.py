@@ -21,6 +21,7 @@ Run ``python scripts/doctor.py`` to check all of this before debugging by hand.
 
 from __future__ import annotations
 
+import platform
 import sys
 from typing import Callable, Iterator, Sequence
 
@@ -28,6 +29,25 @@ from .base import Backend, BackendError, BackendUnavailable
 
 DEFAULT_CHAT_MODEL = "qwen2.5-0.5b"
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
+
+
+def _embedding_device_default() -> str:
+    """Preferred embedding variant when the user said "auto".
+
+    On macOS Apple Silicon this returns ``"cpu"``, deliberately overriding
+    Foundry Local's own choice. Its auto-selected ``-generic-gpu`` embedding
+    variant emits Inf/NaN on this platform (verified macOS 14.6 / M-series,
+    SDK 1.2.3, 2026-07-27), so leaving it on "auto" costs every user a ~500 MB
+    download of a variant that cannot work, followed by a crash whose message
+    points at JSON serialisation rather than at the model.
+
+    :meth:`FoundryBackend.embed` still recovers if this guess is wrong in the
+    other direction, and ``FRAG_DEVICE=gpu`` overrides it outright -- so when
+    Microsoft fixes the variant, nothing here blocks using it.
+    """
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        return "cpu"
+    return "auto"
 
 
 def _import_sdk():
@@ -200,7 +220,7 @@ class FoundryBackend(Backend):
 
         return self._manager
 
-    def _prepare_model(self, alias: str, label: str):
+    def _prepare_model(self, alias: str, label: str, device: str | None = None):
         """Resolve an alias, download it if needed, and load it into memory."""
         manager = self._ensure_manager()
         try:
@@ -212,7 +232,7 @@ class FoundryBackend(Backend):
                 f"Aliases are hardware-dependent. Available here: {available}"
             ) from exc
 
-        select_device_variant(model, self.device, self.verbose)
+        select_device_variant(model, device or self.device, self.verbose)
 
         if not getattr(model, "is_cached", False):
             if self.verbose:
@@ -272,8 +292,11 @@ class FoundryBackend(Backend):
 
     def _ensure_embedding_client(self):
         if self._embedding_client is None:
+            # The embedding model gets its own device policy: the platform
+            # default steers around a variant that is known to be broken here.
+            device = self.device if self.device != "auto" else _embedding_device_default()
             self._embedding_model = self._prepare_model(
-                self.embedding_model_alias, "embedding"
+                self.embedding_model_alias, "embedding", device=device
             )
             self._embedding_client = self._embedding_model.get_embedding_client()
         return self._embedding_client
