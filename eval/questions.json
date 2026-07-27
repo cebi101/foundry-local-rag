@@ -1,0 +1,204 @@
+{
+  "description": "Değerlendirme seti. 'expected_source' null ise soru CEVAPLANAMAZ kabul edilir; sistemin 'bilmiyorum' demesi beklenir. Cevaplanamaz sorular setin yaklaşık üçte birini oluşturur — bir RAG sisteminin en tehlikeli hatası bilmediğini uydurmasıdır.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "RAG kısaltması hangi üç adımdan gelir?",
+      "expected_source": "01-rag-nedir.md",
+      "expected_keywords": ["retrieve", "augment", "generate"]
+    },
+    {
+      "id": "q02",
+      "question": "RAG halüsinasyonu nasıl azaltır?",
+      "expected_source": "01-rag-nedir.md",
+      "expected_keywords": ["bağlam", "belge"]
+    },
+    {
+      "id": "q03",
+      "question": "RAG ile fine-tuning arasındaki fark nedir?",
+      "expected_source": "01-rag-nedir.md",
+      "expected_keywords": ["ağırlık", "pahalı", "kaynak"]
+    },
+    {
+      "id": "q04",
+      "question": "Foundry Local nedir ve ne işe yarar?",
+      "expected_source": "02-foundry-local.md",
+      "expected_keywords": ["yerel", "cihaz", "model"]
+    },
+    {
+      "id": "q05",
+      "question": "Foundry Local'da takma ad (alias) mekanizması nasıl çalışır?",
+      "expected_source": "02-foundry-local.md",
+      "expected_keywords": ["alias", "donanım", "varyant"]
+    },
+    {
+      "id": "q06",
+      "question": "Yerel modellerin sınırları nelerdir?",
+      "expected_source": "02-foundry-local.md",
+      "expected_keywords": ["küçük", "bağlam", "dil"]
+    },
+    {
+      "id": "q07",
+      "question": "Embedding nedir?",
+      "expected_source": "03-embedding-ve-vektor-arama.md",
+      "expected_keywords": ["vektör", "anlam", "sayı"]
+    },
+    {
+      "id": "q08",
+      "question": "Kosinüs benzerliği nasıl hesaplanır?",
+      "expected_source": "03-embedding-ve-vektor-arama.md",
+      "expected_keywords": ["nokta çarpımı", "norm"]
+    },
+    {
+      "id": "q09",
+      "question": "Anlamsal arama ile anahtar kelime araması arasındaki fark nedir?",
+      "expected_source": "03-embedding-ve-vektor-arama.md",
+      "expected_keywords": ["kelime", "anlam"]
+    },
+    {
+      "id": "q10",
+      "question": "Top-K değeri çok büyük seçilirse ne olur?",
+      "expected_source": "03-embedding-ve-vektor-arama.md",
+      "expected_keywords": ["bağlam", "alakasız", "dikkat"]
+    },
+    {
+      "id": "q11",
+      "question": "Neden SQLite kullanıyoruz?",
+      "expected_source": "04-sqlite-ile-yerel-depolama.md",
+      "expected_keywords": ["sunucusuz", "tek dosya", "kurulum"]
+    },
+    {
+      "id": "q12",
+      "question": "Embedding vektörlerini veritabanında saklamanın en iyi yolu nedir?",
+      "expected_source": "04-sqlite-ile-yerel-depolama.md",
+      "expected_keywords": ["blob", "ikili"]
+    },
+    {
+      "id": "q13",
+      "question": "384 boyutlu bir float32 vektör kaç bayt tutar?",
+      "expected_source": "04-sqlite-ile-yerel-depolama.md",
+      "expected_keywords": ["1536"]
+    },
+    {
+      "id": "q14",
+      "question": "İyi bir sistem isteminde hangi kurallar bulunmalı?",
+      "expected_source": "05-prompt-muhendisligi.md",
+      "expected_keywords": ["bağlam", "bilmiyorum", "kaynak"]
+    },
+    {
+      "id": "q15",
+      "question": "Sıcaklık (temperature) ayarı ne yapar ve RAG'de kaç olmalı?",
+      "expected_source": "05-prompt-muhendisligi.md",
+      "expected_keywords": ["düşük", "yaratıcı"]
+    },
+    {
+      "id": "q16",
+      "question": "Sistem istemi ile kullanıcı istemi arasındaki fark nedir?",
+      "expected_source": "05-prompt-muhendisligi.md",
+      "expected_keywords": ["system", "user", "rol"]
+    },
+    {
+      "id": "q17",
+      "question": "Belgeleri neden parçalara bölüyoruz?",
+      "expected_source": "06-belge-parcalama.md",
+      "expected_keywords": ["uzun", "temsil", "sınır"]
+    },
+    {
+      "id": "q18",
+      "question": "Chunk overlap yani örtüşme ne işe yarar?",
+      "expected_source": "06-belge-parcalama.md",
+      "expected_keywords": ["sınır", "bilgi", "kaybol"]
+    },
+    {
+      "id": "q19",
+      "question": "Önerilen parça boyutu ne kadardır?",
+      "expected_source": "06-belge-parcalama.md",
+      "expected_keywords": ["300", "800", "karakter"]
+    },
+    {
+      "id": "q20",
+      "question": "Projenin mimarisi kaç katmandan oluşur?",
+      "expected_source": "07-proje-mimarisi.md",
+      "expected_keywords": ["dört", "arayüz", "veri"]
+    },
+    {
+      "id": "q21",
+      "question": "İndeksleme ile sorgulama arasındaki fark nedir?",
+      "expected_source": "07-proje-mimarisi.md",
+      "expected_keywords": ["yavaş", "hızlı", "bir kez"]
+    },
+    {
+      "id": "q22",
+      "question": "Backend soyutlaması neden var?",
+      "expected_source": "07-proje-mimarisi.md",
+      "expected_keywords": ["test", "sahte", "kurulu olmayan"]
+    },
+    {
+      "id": "q23",
+      "question": "Recall@K metriği neyi ölçer?",
+      "expected_source": "08-test-ve-degerlendirme.md",
+      "expected_keywords": ["ilk", "kaynak", "getir"]
+    },
+    {
+      "id": "q24",
+      "question": "Test setinde cevaplanamaz sorular neden bulunmalı?",
+      "expected_source": "08-test-ve-degerlendirme.md",
+      "expected_keywords": ["uydur", "tehlikeli", "bilmediği"]
+    },
+    {
+      "id": "q25",
+      "question": "Sistem yavaşsa hangi çarelere başvurulur?",
+      "expected_source": "08-test-ve-degerlendirme.md",
+      "expected_keywords": ["daha az", "küçük model", "önbellek"]
+    },
+
+    {
+      "id": "u01",
+      "question": "Türkiye'nin başkenti neresidir?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u02",
+      "question": "Jüpiter gezegeninin kaç uydusu vardır?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u03",
+      "question": "2026 Dünya Kupası'nı hangi ülke kazandı?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u04",
+      "question": "Mercimek çorbası tarifi nedir?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u05",
+      "question": "Bitcoin'in bugünkü fiyatı kaç dolar?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u06",
+      "question": "Kediler günde kaç saat uyur?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u07",
+      "question": "Fotosentez nasıl gerçekleşir?",
+      "expected_source": null,
+      "expected_keywords": []
+    },
+    {
+      "id": "u08",
+      "question": "Osmanlı Devleti hangi yılda kuruldu?",
+      "expected_source": null,
+      "expected_keywords": []
+    }
+  ]
+}

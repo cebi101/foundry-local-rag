@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is macOS's system Python: the core library and the offline
+        # backend must keep working there even though Foundry Local cannot.
+        # 3.12 is the recommended version for the real setup.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        # Deliberately NOT installing foundry-local-sdk: CI must stay offline
+        # and must not download gigabytes of model weights. Everything is
+        # exercised through the hashing backend.
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Smoke test the CLI end to end
+        run: |
+          python -m app.cli --backend hashing ingest
+          python -m app.cli --backend hashing info
+          python -m app.cli --backend hashing ask "Kosinüs benzerliği nedir?"
+
+      - name: Run the evaluation set
+        run: python eval/evaluate.py --backend hashing --no-save
+
+      - name: Environment doctor
+        # Informational: on CI this reports "Foundry Local not installed",
+        # which is expected. Never fails the build.
+        run: python scripts/doctor.py || true

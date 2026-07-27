@@ -1,0 +1,22 @@
+# Yerel RAG Asistanı — Python bağımlılıkları
+#
+# ÖNEMLİ: Python 3.11+ gerekir. macOS'un sistem Python'u 3.9'dur ve pip
+# foundry-local-sdk'nın ESKİ 0.5.1 sürümünü sessizce kurar. Önce:
+#   brew install python@3.12
+#   /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
+# Kontrol için: python scripts/doctor.py
+
+# --- çekirdek ---
+numpy>=1.24
+
+# --- Foundry Local (yerel model çalıştırma) ---
+# 1.x in-process çalışır; ayrıca foundry CLI kurmaya gerek YOKTUR.
+# macOS'ta yalnızca arm64 (Apple Silicon) wheel'leri yayınlanır.
+foundry-local-sdk>=1.2 ; python_version >= "3.11"
+openai>=1.40 ; python_version >= "3.11"
+
+# --- web arayüzü ---
+streamlit>=1.30
+
+# --- geliştirme / test ---
+pytest>=7.4
