@@ -420,11 +420,19 @@ python -m app.cli ask "RAG nedir?" > cevap.txt
 ```
 
 Konsola yazarken Python Windows'ta Unicode'u doğrudan konsola verir ve sorun
-çıkmaz. Ama çıktıyı bir dosyaya veya boruya yönlendirdiğinde yerel kod sayfası
-(Türkçe Windows'ta `cp1254`) devreye girer ve şuna benzer bir hata alabilirsin:
+çıkmaz. Ama çıktıyı bir dosyaya veya boruya yönlendirdiğinde konsol devreden
+çıkar ve **sistemin yerel kod sayfası** devreye girer:
+
+| Windows dil ayarı | Kod sayfası | Türkçe karakterler |
+|---|---|---|
+| Türkçe | `cp1254` | Sorunsuz — `ı ğ ş İ Ö Ü Ç` bu tabloda var |
+| İngilizce / çoğu diğer dil | `cp1252` | **Patlar** — `ı`, `ğ`, `ş` bu tabloda yok |
+
+Yani hata, Windows'un dili Türkçe *değilse* çıkar — ki okul ve kurum
+makinelerinde en yaygın durum budur:
 
 ```
-UnicodeEncodeError: 'charmap' codec can't encode character ...
+UnicodeEncodeError: 'charmap' codec can't encode character 'ı' ...
 ```
 
 Tek satırlık kalıcı çözüm — Python'un UTF-8 modunu aç:
@@ -810,10 +818,11 @@ terminalleri ve `streamlit` süreçlerini kapat.
 
 Foundry Local önbelleği **`app_name`'e göre ayırır.** Bu projenin `app_name`
 değeri `foundry_local_rag`'dir (`backends/foundry.py` içinde sabit), dolayısıyla
-bu projenin indirdiği her şey ev dizinindeki `.foundry_local_rag` klasörü altındadır:
+bu projenin indirdiği her şey ev dizinindeki `.foundry_local_rag` klasörü
+altındadır — yani `C:\Users\<kullanici>\.foundry_local_rag`. Gözünle görmek için:
 
 ```powershell
-$env:USERPROFILE\.foundry_local_rag
+explorer "$env:USERPROFILE\.foundry_local_rag"
 ```
 
 | Alt klasör | İçerik |
