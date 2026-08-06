@@ -81,16 +81,33 @@ Bu bir NLI modeli değil — çelişkiyi ve ortak kelimesiz eş anlamlıyı yaka
 Ama ikinci bir model indirmesi de gerektirmez ve asıl önemli hatayı güvenilir
 biçimde yakalar: **modelin bağlamda hiç geçmeyen bir şeyi iddia etmesi.**
 
-> **Ölçülmüş sınır: dejenerasyon dayanaklı görünüyor.** Denetim kelime örtüşmesine
-> dayandığı için, model tekrar döngüsüne girip bağlamdaki kelimeleri döndürdüğünde
-> skor **yükselir** — tekrarlanan kelimeler gerçekten bağlamda geçtiği için. Gerçek
-> bir çalıştırmada `qwen2.5-0.5b` anlamsız ve kendini tekrar eden bir metin üretti,
-> denetim **%42** verdi ve bu `min_groundedness=0.34` eşiğinin üstünde kaldığı için
-> devre kesici tetiklenmedi; çöp metin kullanıcıya gösterildi.
->
-> Yani denetleyici **uydurmayı** yakalıyor, **bozuk üretimi** yakalamıyor. Bunlar
-> farklı iki hata ve ayrı sinyal gerektiriyor: dejenerasyon, kelime örtüşmesinden
-> bağımsız olarak tekrar oranıyla ölçülmeli. Henüz yapılmadı.
+#### Destek tek başına yetmiyor: ikinci sinyal
+
+Bu denetim canlı kullanımda bir açık verdi ve açık yapısaldı. Ölçüm kelime
+örtüşmesine dayandığı için, model tekrar döngüsüne girip bağlamdaki kelimeleri
+döndürdüğünde skor **yükseliyor** — tekrarladığı kelimeler gerçekten bağlamda
+geçtiği için. Gerçek bir çalıştırmada `qwen2.5-0.5b` anlamsız ve kendini tekrar
+eden bir metin üretti, denetim **%42** verdi, `min_groundedness=0.34` eşiğinin
+üstünde kaldı ve çöp metin kullanıcıya gösterildi.
+
+Uydurma ile dejenerasyon **farklı iki hata**, o yüzden ikincisi ayrı ölçülüyor:
+`is_degenerate()` tekrarı **yalnızca cevabın kendisinden** okur — farklı bigram
+oranı artı birebir tekrarlanan cümle. Bağlamdan bağımsız olması işin özü;
+destek zaten bağlama karşı ölçüldüğü için aynı kaynağa bakan bir sinyal aynı
+körlüğü paylaşırdı.
+
+Eşik tahmin edilmedi. Gerçek model çıktısı üzerinde ölçüldü:
+
+| | distinct-2 |
+|---|---|
+| Alıntı cevaplar (bilinen sağlıklı) | 0.776 – 1.000 |
+| Bilgi tabanındaki 8 belge | 0.943 – 0.977 |
+| Üretilen cevaplar | 0.405 – 1.000 |
+| **Açığı veren gerçek çöp metin** | **0.717** |
+
+`0.75`, sağlıklı olanın en kötüsü ile bozuk olanın en iyisi arasındaki boşluğa
+oturuyor. Devre kesici artık **iki tetikleyiciyle** çalışıyor: destek eşiğin
+altına düşerse ya da cevap dejenere ise alıntıya iniliyor.
 
 ### 4. Eşik kalibrasyonu ve CI kalite kapısı
 

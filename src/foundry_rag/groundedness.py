@@ -33,19 +33,19 @@ and a dependency the offline fallback cannot satisfy. Lexical entailment is the
 honest 80% here: it reliably catches the failure that actually matters --
 **the model asserting something the context never mentioned**.
 
-Known blind spot: degeneration reads as grounded
-------------------------------------------------
-Because support is lexical overlap, a model stuck in a repetition loop *gains*
-score -- the words it keeps echoing came from the context, so every repeated
-clause looks supported. Observed with ``qwen2.5-0.5b``: an answer that had
-collapsed into meaningless repeated Turkish scored **42%**, above the 0.34
-fallback threshold, so the circuit breaker in :mod:`foundry_rag.pipeline` did
-not fire and the text reached the user.
+Second failure: degeneration reads as grounded
+----------------------------------------------
+Support alone is not enough, and the reason is structural. Because support is
+lexical overlap, a model stuck in a repetition loop *gains* score -- the words
+it keeps echoing came from the context, so every repeated clause looks
+supported. Observed with ``qwen2.5-0.5b``: an answer that had collapsed into
+meaningless repeated Turkish scored **42%**, above the 0.34 fallback threshold,
+so the circuit breaker let it through to the user.
 
-Fabrication and degeneration are different failures and need different signals.
-This module measures the first. Catching the second needs a repetition measure
-(repeated n-gram ratio) that does not depend on overlap with the context --
-not implemented yet.
+Fabrication and degeneration are different failures and need different signals,
+so :func:`is_degenerate` measures repetition *from the answer alone* -- distinct
+bigram ratio plus verbatim sentence repeats. A report now carries both verdicts
+and the pipeline falls back to quoting when either one fires.
 
 The score is a *signal*, not a verdict. A low score means "look at this",
 not "this is false".
@@ -76,6 +76,16 @@ STOPWORDS = frozenset(
 #: below this, a sentence is reported as unsupported
 SUPPORT_THRESHOLD = 0.45
 
+#: Distinct-bigram floor. Below this an answer is treated as degenerate.
+#:
+#: Not a guess. Measured on real ``qwen2.5-0.5b`` output over the evaluation
+#: questions: ten generated answers spanned 0.405-1.000, while the extractive
+#: answers quoting the same retrieved passages never fell below 0.776, and the
+#: degenerate sample that motivated this check scored 0.717. 0.75 is the gap
+#: between the worst healthy value and the best degenerate one. Re-measure if
+#: the chat model changes -- a fluent model's floor sits higher.
+DEGENERACY_THRESHOLD = 0.75
+
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
 #: markdown noise and bracketed citations are not claims
 _CITATION = re.compile(r"\[[^\]]*\]")
@@ -102,6 +112,8 @@ class GroundednessReport:
 
     score: float
     sentences: list[SentenceVerdict] = field(default_factory=list)
+    #: the answer collapsed into repetition -- see :func:`is_degenerate`
+    degenerate: bool = False
 
     @property
     def unsupported(self) -> list[SentenceVerdict]:
@@ -109,7 +121,16 @@ class GroundednessReport:
 
     @property
     def is_clean(self) -> bool:
-        return not self.unsupported
+        return not self.unsupported and not self.degenerate
+
+    @property
+    def trustworthy(self) -> bool:
+        """Cheap single question for callers: can this answer be shown as-is?
+
+        Kept separate from :attr:`score` because the two failures are
+        independent -- a degenerate answer can score *well* on support.
+        """
+        return not self.degenerate
 
     def summary(self) -> str:
         if not self.sentences:
@@ -119,6 +140,8 @@ class GroundednessReport:
         line = f"Kaynaklilik: %{self.score * 100:.0f} ({good}/{total} cumle dayanakli)"
         if self.unsupported:
             line += f" -- {len(self.unsupported)} cumle bağlamda doğrulanamadı"
+        if self.degenerate:
+            line += " -- [!] cevap kendini tekrar ediyor (dejenere)"
         return line
 
 
@@ -128,6 +151,45 @@ def split_sentences(text: str) -> list[str]:
     parts = [p.strip(" -•\t") for p in _SENTENCE_SPLIT.split(cleaned)]
     # very short fragments carry no checkable claim ("Evet.", "Ozet:")
     return [p for p in parts if len(p) >= 25]
+
+
+def distinct_bigram_ratio(text: str) -> float:
+    """Share of word bigrams that are unique. 1.0 = no phrase ever repeats.
+
+    Deliberately independent of the retrieved context. That independence is the
+    whole point: support is measured *against* the passages, so a model looping
+    on words taken from those passages scores well on support while saying
+    nothing. Repetition has to be judged from the answer alone.
+    """
+    words = re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+    if len(words) < 2:
+        return 1.0
+    bigrams = [(words[i], words[i + 1]) for i in range(len(words) - 1)]
+    return len(set(bigrams)) / len(bigrams)
+
+
+def repeated_sentence(text: str) -> str:
+    """A sentence the answer states more than once verbatim, or ``""``.
+
+    Exact repetition needs no threshold: a model that emits the same sentence
+    twice in one short answer has stopped making progress. This catches the
+    tight loops that a whole-text ratio can dilute when the answer is long.
+    """
+    seen: set[str] = set()
+    for sentence in split_sentences(text):
+        key = " ".join(sentence.lower().split())
+        if key in seen:
+            return sentence
+        seen.add(key)
+    return ""
+
+
+def is_degenerate(text: str) -> bool:
+    """Has the answer collapsed into repetition rather than said something?"""
+    return (
+        distinct_bigram_ratio(text) < DEGENERACY_THRESHOLD
+        or bool(repeated_sentence(text))
+    )
 
 
 def _content_terms(text: str) -> Counter:
@@ -187,11 +249,14 @@ def check(
     if not sentences:
         return GroundednessReport(score=1.0, sentences=[])
 
+    degenerate = is_degenerate(answer)
+
     if not hits:
         # An answer with no retrieved context cannot be grounded in anything.
         return GroundednessReport(
             score=0.0,
             sentences=[SentenceVerdict(s, 0.0, False) for s in sentences],
+            degenerate=degenerate,
         )
 
     passages = [f"{h.record.heading}\n{h.record.content}" for h in hits]
@@ -215,4 +280,6 @@ def check(
         )
 
     supported = sum(1 for v in verdicts if v.supported)
-    return GroundednessReport(score=supported / len(verdicts), sentences=verdicts)
+    return GroundednessReport(
+        score=supported / len(verdicts), sentences=verdicts, degenerate=degenerate
+    )

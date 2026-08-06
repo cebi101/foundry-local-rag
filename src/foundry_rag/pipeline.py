@@ -328,10 +328,15 @@ class RagPipeline:
         # supported by the very passages it was given, showing it anyway means
         # knowingly handing the user something measured to be untrustworthy.
         # Quoting the sources instead is worse prose and better information.
+        #
+        # Two independent triggers, because there are two independent failures.
+        # A degenerate answer can *pass* the support check: the words it loops
+        # on came from the context, so repetition inflates the score. One real
+        # sample scored 42% -- above this threshold -- while being meaningless.
         if (
             self.settings.answer_mode == "auto"
             and report is not None
-            and report.score < self.settings.min_groundedness
+            and (report.score < self.settings.min_groundedness or report.degenerate)
         ):
             return Answer(
                 question=question,

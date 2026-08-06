@@ -205,3 +205,36 @@ def test_invalid_answer_mode_is_rejected(settings):
     settings.answer_mode = "sacmalik"
     with pytest.raises(ValueError, match="answer_mode"):
         settings.validate()
+
+
+class DegeneratingBackend(HallucinatingBackend):
+    """Retrieves correctly, then collapses into a loop built from the context.
+
+    The nastiest case, and the one that shipped: every word comes from the
+    retrieved passage, so support scores near-perfect. Only repetition gives
+    it away.
+    """
+
+    name = "degenerating-test"
+
+    def chat(self, messages, temperature=0.1, max_tokens=600):
+        line = "Kediler taurin adlı amino asidi kendi vücutlarında üretemezler."
+        return " ".join([line] * 3)
+
+
+def test_degenerate_answer_scores_well_on_support(indexed):
+    """Establishes the premise: the support check cannot catch this alone."""
+    indexed.answer_mode = "generative"
+    with RagPipeline(indexed, backend=DegeneratingBackend()) as rag:
+        answer = rag.answer("Kediler neden taurine ihtiyaç duyar?")
+        assert answer.groundedness.score >= indexed.min_groundedness
+        assert answer.groundedness.degenerate
+
+
+def test_breaker_fires_on_degeneration_despite_high_support(indexed):
+    """The regression this exists for: a well-supported loop must not ship."""
+    indexed.answer_mode = "auto"
+    with RagPipeline(indexed, backend=DegeneratingBackend()) as rag:
+        answer = rag.answer("Kediler neden taurine ihtiyaç duyar?")
+        assert answer.mode == "extractive-fallback"
+        assert FALLBACK_NOTICE.strip() in answer.text

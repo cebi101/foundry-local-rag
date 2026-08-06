@@ -136,12 +136,18 @@ def render_groundedness(report: dict | None) -> None:
         return
 
     score = report["score"]
-    if score == 1.0:
+    # Degeneration first: a looping answer can score *well* on support, so
+    # reporting the percentage without this would read as a clean bill.
+    if report.get("degenerate"):
+        callout("bad", report["summary"], icon="✕ Cevap kendini tekrar ediyor")
+    elif score == 1.0:
         callout("good", report["summary"], icon="✓ Dayanaklı")
         return
-
-    tone, icon = ("warn", "⚠ Kısmen dayanaklı") if score >= 0.5 else ("bad", "✕ Dayanaksız")
-    callout(tone, report["summary"], icon=icon)
+    else:
+        tone, icon = (
+            ("warn", "⚠ Kısmen dayanaklı") if score >= 0.5 else ("bad", "✕ Dayanaksız")
+        )
+        callout(tone, report["summary"], icon=icon)
     with st.expander(f"Doğrulanamayan cümleler ({len(report['unsupported'])})"):
         st.caption(
             "Bu cümleler getirilen belgelerde doğrulanamadı — modelin kendi "
@@ -266,6 +272,7 @@ if question:
                 report = {
                     "score": answer.groundedness.score,
                     "summary": answer.groundedness.summary(),
+                    "degenerate": answer.groundedness.degenerate,
                     "sentences": [v.text for v in answer.groundedness.sentences],
                     "unsupported": [
                         {"text": v.text, "score": v.score}
