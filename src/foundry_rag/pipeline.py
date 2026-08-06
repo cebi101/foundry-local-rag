@@ -38,6 +38,41 @@ META_BACKEND = "backend"
 META_DOC_COUNT = "document_count"
 
 
+class IndexUnusable(RuntimeError):
+    """The index cannot answer questions as it stands. Re-ingesting fixes it.
+
+    Typed rather than a bare ``RuntimeError`` so a caller can tell "rebuild the
+    index and you are done" apart from a genuine failure. The Streamlit app uses
+    that distinction to offer a one-click rebuild instead of a dead end; the CLI
+    still catches ``RuntimeError`` and prints the message, which is why this
+    subclasses it.
+    """
+
+
+class EmptyIndex(IndexUnusable):
+    """Nothing has been ingested yet."""
+
+
+class IndexMismatch(IndexUnusable):
+    """The index was built by a different embedding model.
+
+    Carries both signatures because the interesting part -- which model wrote
+    the index versus which one is asking -- should not have to be recovered by
+    parsing the message text.
+    """
+
+    def __init__(self, stored: str, current: str) -> None:
+        self.stored = stored
+        self.current = current
+        super().__init__(
+            "Indeks farkli bir embedding modeliyle olusturulmus.\n"
+            f"  indekste: {stored}\n"
+            f"  simdiki : {current}\n"
+            "Vektor uzaylari uyumsuz. Yeniden indeksle:\n"
+            "  python -m app.cli ingest"
+        )
+
+
 @dataclass
 class IngestReport:
     """What an ingestion run actually did."""
@@ -206,20 +241,14 @@ class RagPipeline:
     def _check_index(self) -> None:
         """Refuse to answer against an index built by a different embedder."""
         if self.store.count() == 0:
-            raise RuntimeError(
+            raise EmptyIndex(
                 "Veritabani bos. Once belgeleri indeksle:\n"
                 "  python -m app.cli ingest"
             )
         stored = self.store.get_meta(META_SIGNATURE)
         current = self.backend.embedding_signature()
         if stored and stored != current:
-            raise RuntimeError(
-                "Indeks farkli bir embedding modeliyle olusturulmus.\n"
-                f"  indekste: {stored}\n"
-                f"  simdiki : {current}\n"
-                "Vektor uzaylari uyumsuz. Yeniden indeksle:\n"
-                "  python -m app.cli ingest"
-            )
+            raise IndexMismatch(stored, current)
 
     # -- retrieval -------------------------------------------------------
 

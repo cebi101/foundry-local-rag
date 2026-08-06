@@ -1,0 +1,14 @@
+# Warm plum/amber/clay theme.
+#
+# Deliberately not Streamlit's default blue-on-white, and deliberately not
+# green for "good": the groundedness report is the centrepiece of this app and
+# it needed a severity ramp that reads as temperature (gold -> clay -> rose)
+# rather than the traffic-light convention. The matching status tones live in
+# PALETTE in app/streamlit_app.py -- change both together.
+
+[theme]
+base = "dark"
+primaryColor = "#C08AD8"            # orchid: buttons, sliders, focus rings
+backgroundColor = "#1B1720"         # deep warm charcoal-plum
+secondaryBackgroundColor = "#262030"  # sidebar and expander surfaces
+textColor = "#EDE4DA"               # warm off-white, not pure white

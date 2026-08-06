@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from foundry_rag import RagPipeline, Settings, ingest
+from foundry_rag import (
+    EmptyIndex,
+    IndexMismatch,
+    IndexUnusable,
+    RagPipeline,
+    Settings,
+    ingest,
+)
 from foundry_rag.backends.hashing import HashingBackend
 from foundry_rag.pipeline import META_SIGNATURE
 from foundry_rag.store import VectorStore
@@ -126,3 +133,32 @@ def test_signature_mismatch_is_detected(settings, backend, monkeypatch):
         store.set_meta(META_SIGNATURE, "baska-model:1024")
     with pytest.raises(RuntimeError, match="farkli bir embedding modeliyle"):
         RagPipeline(settings, backend=backend)
+
+
+def test_mismatch_carries_both_signatures(settings, backend):
+    """The UI offers a one-click rebuild, so it needs the facts as data.
+
+    Parsing them back out of the message text would break the moment the
+    wording changes.
+    """
+    ingest(settings, backend=backend, verbose=False)
+    with VectorStore(settings.db_path) as store:
+        store.set_meta(META_SIGNATURE, "baska-model:1024")
+    with pytest.raises(IndexMismatch) as caught:
+        RagPipeline(settings, backend=backend)
+    assert caught.value.stored == "baska-model:1024"
+    assert caught.value.current == backend.embedding_signature()
+
+
+def test_both_index_faults_share_a_recoverable_base(settings, backend):
+    """EmptyIndex and IndexMismatch both mean 're-ingest and you are done'.
+
+    The app catches the base class to offer that fix, so the two must stay
+    under it -- and must stay RuntimeErrors for the CLI's handler.
+    """
+    assert issubclass(EmptyIndex, IndexUnusable)
+    assert issubclass(IndexMismatch, IndexUnusable)
+    assert issubclass(IndexUnusable, RuntimeError)
+
+    with pytest.raises(IndexUnusable):
+        RagPipeline(settings, backend=backend)  # empty index

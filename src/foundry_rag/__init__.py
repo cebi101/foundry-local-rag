@@ -19,7 +19,15 @@ from .config import PROJECT_ROOT, Settings
 from .extractive import extract_answer
 from .groundedness import GroundednessReport, SentenceVerdict
 from .lexical import BM25Index
-from .pipeline import Answer, IngestReport, RagPipeline, ingest
+from .pipeline import (
+    Answer,
+    EmptyIndex,
+    IndexMismatch,
+    IndexUnusable,
+    IngestReport,
+    RagPipeline,
+    ingest,
+)
 from .retrieval import (
     SearchHit,
     cosine_similarity,
@@ -39,7 +47,10 @@ __all__ = [
     "BackendUnavailable",
     "Chunk",
     "ChunkRecord",
+    "EmptyIndex",
     "GroundednessReport",
+    "IndexMismatch",
+    "IndexUnusable",
     "IngestReport",
     "PROJECT_ROOT",
     "RagPipeline",

@@ -8,6 +8,7 @@ are produced, change ``foundry_rag.pipeline``, not this file.
 
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 
@@ -19,10 +20,54 @@ if str(ROOT / "src") not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from foundry_rag import RagPipeline, Settings, VectorStore, ingest  # noqa: E402
+from foundry_rag import (  # noqa: E402
+    IndexUnusable,
+    RagPipeline,
+    Settings,
+    VectorStore,
+    ingest,
+)
 from foundry_rag.backends import BackendError, BackendUnavailable  # noqa: E402
 
 st.set_page_config(page_title="Yerel RAG Asistanı", page_icon="📚", layout="wide")
+
+# Warm palette -- plum, amber, clay -- deliberately avoiding the blue/white
+# default and the green "all good" convention. The three status tones form a
+# single warm ramp (gold -> clay -> rose) so severity reads as temperature
+# rather than as hue changes, and each callout carries an icon and a word too:
+# colour alone must never be the only signal.
+PALETTE = {
+    "plum": "#C08AD8",
+    "good": "#E0B252",
+    "warn": "#D98650",
+    "bad": "#CF5D74",
+    "muted": "#A99BA5",
+}
+
+
+def callout(tone: str, text: str, icon: str = "") -> None:
+    """A themed status box.
+
+    Streamlit's ``st.success``/``st.warning``/``st.error`` hardcode green,
+    yellow and red. Rendering our own keeps the page on one palette.
+    """
+    colour = PALETTE[tone]
+    body = html.escape(text).replace("\n", "<br>")
+    st.markdown(
+        f"<div style='border-left:4px solid {colour};background:{colour}1A;"
+        f"padding:0.7rem 0.9rem;border-radius:6px;margin:0.35rem 0;'>"
+        f"<span style='color:{colour};font-weight:600;'>{icon}</span> {body}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+st.markdown(
+    f"""<style>
+    .stChatMessage {{ background: #241E2C; border-radius: 10px; }}
+    code {{ color: {PALETTE["good"]}; }}
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -39,6 +84,26 @@ def load_pipeline(backend: str, top_k: int, min_similarity: float) -> RagPipelin
     settings.min_similarity = min_similarity
     settings.validate()
     return RagPipeline(settings, verbose=False)
+
+
+def run_ingest(backend_choice: str) -> None:
+    """Rebuild the index with the backend currently selected in the sidebar.
+
+    Shared by the sidebar button and the recovery panel, so a rebuild started
+    from either place uses the same backend the questions will be asked with --
+    which is the whole point when recovering from a signature mismatch.
+    """
+    settings = Settings.from_env()
+    settings.backend = backend_choice
+    with st.spinner("İndeksleniyor... (ilk çalıştırmada model indirilebilir)"):
+        try:
+            report = ingest(settings, verbose=False)
+        except (BackendUnavailable, BackendError, ValueError, FileNotFoundError) as exc:
+            callout("bad", str(exc), icon="✕ İndeksleme başarısız")
+            return
+    st.cache_resource.clear()
+    callout("good", report.summary(), icon="✓ Tamam")
+    st.rerun()
 
 
 def index_status(db_path: Path) -> tuple[int, int, str]:
@@ -72,10 +137,11 @@ def render_groundedness(report: dict | None) -> None:
 
     score = report["score"]
     if score == 1.0:
-        st.success(report["summary"], icon="✅")
+        callout("good", report["summary"], icon="✓ Dayanaklı")
         return
 
-    (st.warning if score >= 0.5 else st.error)(report["summary"], icon="⚠️")
+    tone, icon = ("warn", "⚠ Kısmen dayanaklı") if score >= 0.5 else ("bad", "✕ Dayanaksız")
+    callout(tone, report["summary"], icon=icon)
     with st.expander(f"Doğrulanamayan cümleler ({len(report['unsupported'])})"):
         st.caption(
             "Bu cümleler getirilen belgelerde doğrulanamadı — modelin kendi "
@@ -117,15 +183,7 @@ with st.sidebar:
     st.caption(f"İndeks backend'i: `{meta_backend}`")
 
     if st.button("🔄 Belgeleri yeniden indeksle", use_container_width=True):
-        settings = Settings.from_env()
-        settings.backend = backend_choice
-        with st.spinner("İndeksleniyor... (ilk çalıştırmada model indirilebilir)"):
-            try:
-                report = ingest(settings, verbose=False)
-                st.cache_resource.clear()
-                st.success(report.summary())
-            except (BackendUnavailable, BackendError, ValueError, FileNotFoundError) as exc:
-                st.error(str(exc))
+        run_ingest(backend_choice)
 
     st.divider()
     st.caption(f"Belge klasörü: `{base_settings.docs_dir}`")
@@ -141,19 +199,42 @@ st.caption(
 )
 
 if chunks == 0:
-    st.warning(
-        "İndeks boş. Soldaki **Belgeleri yeniden indeksle** düğmesine bas ya da "
-        "terminalde `python -m app.cli ingest` çalıştır."
-    )
+    callout("warn", "İndeks boş — henüz hiçbir belge işlenmemiş.", icon="⚠ Hazır değil")
+    st.caption(f"Belge klasörü: `{base_settings.docs_dir}`")
+    if st.button("📚 Belgeleri şimdi indeksle", type="primary"):
+        run_ingest(backend_choice)
     st.stop()
 
 try:
     rag = load_pipeline(backend_choice, top_k, min_similarity)
+except IndexUnusable as exc:
+    # Recoverable by construction: the index just needs rebuilding with the
+    # backend that is about to ask the questions. Offering that here is the
+    # difference between a dead end and a working app one click later.
+    stored = getattr(exc, "stored", "")
+    if stored:
+        callout(
+            "warn",
+            "İndeks başka bir embedding modeliyle kurulmuş, vektör uzayları uyumsuz.\n"
+            f"indekste : {stored}\n"
+            f"şimdiki  : {exc.current}",
+            icon="⚠ İndeks eşleşmiyor",
+        )
+        st.caption(
+            "İki çıkış yolu var: indeksi şimdiki backend ile yeniden kur, ya da "
+            "soldaki **Backend** seçimini indeksi kuran modele çevir."
+        )
+    else:
+        callout("warn", str(exc), icon="⚠ İndeks kullanılamıyor")
+
+    if st.button(f"🔄 `{backend_choice}` ile yeniden indeksle", type="primary"):
+        run_ingest(backend_choice)
+    st.stop()
 except (BackendUnavailable, BackendError, RuntimeError) as exc:
-    st.error(str(exc))
+    callout("bad", str(exc), icon="✕ Başlatılamadı")
     st.stop()
 
-st.info(f"Aktif backend: **{rag.backend.describe()}**", icon="🧠")
+callout("plum", f"Aktif backend: {rag.backend.describe()}", icon="🧠")
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -225,4 +306,4 @@ if question:
                 }
             )
         except BackendError as exc:
-            st.error(str(exc))
+            callout("bad", str(exc), icon="✕ Cevap üretilemedi")
