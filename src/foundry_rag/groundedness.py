@@ -33,6 +33,20 @@ and a dependency the offline fallback cannot satisfy. Lexical entailment is the
 honest 80% here: it reliably catches the failure that actually matters --
 **the model asserting something the context never mentioned**.
 
+Known blind spot: degeneration reads as grounded
+------------------------------------------------
+Because support is lexical overlap, a model stuck in a repetition loop *gains*
+score -- the words it keeps echoing came from the context, so every repeated
+clause looks supported. Observed with ``qwen2.5-0.5b``: an answer that had
+collapsed into meaningless repeated Turkish scored **42%**, above the 0.34
+fallback threshold, so the circuit breaker in :mod:`foundry_rag.pipeline` did
+not fire and the text reached the user.
+
+Fabrication and degeneration are different failures and need different signals.
+This module measures the first. Catching the second needs a repetition measure
+(repeated n-gram ratio) that does not depend on overlap with the context --
+not implemented yet.
+
 The score is a *signal*, not a verdict. A low score means "look at this",
 not "this is false".
 """

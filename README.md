@@ -81,6 +81,17 @@ Bu bir NLI modeli değil — çelişkiyi ve ortak kelimesiz eş anlamlıyı yaka
 Ama ikinci bir model indirmesi de gerektirmez ve asıl önemli hatayı güvenilir
 biçimde yakalar: **modelin bağlamda hiç geçmeyen bir şeyi iddia etmesi.**
 
+> **Ölçülmüş sınır: dejenerasyon dayanaklı görünüyor.** Denetim kelime örtüşmesine
+> dayandığı için, model tekrar döngüsüne girip bağlamdaki kelimeleri döndürdüğünde
+> skor **yükselir** — tekrarlanan kelimeler gerçekten bağlamda geçtiği için. Gerçek
+> bir çalıştırmada `qwen2.5-0.5b` anlamsız ve kendini tekrar eden bir metin üretti,
+> denetim **%42** verdi ve bu `min_groundedness=0.34` eşiğinin üstünde kaldığı için
+> devre kesici tetiklenmedi; çöp metin kullanıcıya gösterildi.
+>
+> Yani denetleyici **uydurmayı** yakalıyor, **bozuk üretimi** yakalamıyor. Bunlar
+> farklı iki hata ve ayrı sinyal gerektiriyor: dejenerasyon, kelime örtüşmesinden
+> bağımsız olarak tekrar oranıyla ölçülmeli. Henüz yapılmadı.
+
 ### 4. Eşik kalibrasyonu ve CI kalite kapısı
 
 `min_similarity` ne zaman cevap verileceğine karar verir. Düşük olursa sistem
