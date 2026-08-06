@@ -50,16 +50,52 @@ def _embedding_device_default() -> str:
     return "auto"
 
 
+def venv_setup_command() -> str:
+    """How to get a Python 3.12 virtual environment *on this operating system*.
+
+    Every "your Python is too old" message ends with a command the reader is
+    meant to paste. Hardcoding the macOS recipe means a Windows student is told
+    to run ``brew``, which does not exist there -- so the one message whose
+    whole job is to unblock them sends them somewhere that cannot work.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return (
+            "winget install Python.Python.3.12 && py -3.12 -m venv .venv && "
+            r".venv\Scripts\Activate.ps1 && pip install -r requirements.txt"
+        )
+    if system == "Darwin":
+        return (
+            "brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv "
+            "&& source .venv/bin/activate && pip install -r requirements.txt"
+        )
+    return (
+        "python3.12 -m venv .venv && source .venv/bin/activate "
+        "&& pip install -r requirements.txt"
+    )
+
+
+def _old_python_reason() -> str:
+    """Why the interpreter is too old, phrased for the OS the reader is on."""
+    if platform.system() == "Darwin":
+        return (
+            "macOS ships 3.9 as /usr/bin/python3 and pip will silently install the "
+            "incompatible 0.5.1 SDK instead of erroring."
+        )
+    return (
+        "pip filters releases by requires_python, so rather than erroring it "
+        "silently installs the incompatible 0.5.1 SDK."
+    )
+
+
 def _import_sdk():
     """Import the 1.x SDK, or raise :class:`BackendUnavailable` with a real fix."""
     if sys.version_info < (3, 11):
         raise BackendUnavailable(
             f"Foundry Local SDK 1.x requires Python >= 3.11, but this interpreter is "
             f"{sys.version_info.major}.{sys.version_info.minor}.\n"
-            "macOS ships 3.9 as /usr/bin/python3 and pip will silently install the "
-            "incompatible 0.5.1 SDK instead of erroring.\n"
-            "Fix:  brew install python@3.12 && "
-            "/opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate"
+            f"{_old_python_reason()}\n"
+            f"Fix:  {venv_setup_command()}"
         )
     try:
         from foundry_local_sdk import Configuration, FoundryLocalManager  # noqa: PLC0415

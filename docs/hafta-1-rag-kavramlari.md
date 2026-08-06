@@ -122,6 +122,19 @@ Bilinen tuzaklar (hepsi `src/foundry_rag/backends/foundry.py` ve `scripts/doctor
 - `brew install foundry` **tamamen başka bir yazılım** kurar (Ethereum aracı).
 - Sistem Python'unda `sqlite3` uzantı yükleyemez (`enable_load_extension` yok), yani `sqlite-vec` kullanılamaz. Bu proje için sorun değil: arama numpy ile yapılıyor.
 
+Windows'ta durum:
+
+| Konu | Durum |
+|---|---|
+| Donanım | x64 ve ARM64 desteklenir. macOS'taki arm64 kısıtı burada yoktur. |
+| Hızlandırma | Donanıma göre Foundry Local seçer: NVIDIA'da CUDA, Snapdragon X'te NPU, yoksa CPU. |
+| Python | Aynı: SDK 1.x **>= 3.11** ister. Windows Python ile gelmez, kurmanız gerekir. |
+| CLI | Aynı: gerekmez. `winget install Microsoft.FoundryLocal` bu proje için gereksizdir. |
+| **1 numaralı tuzak** | Farklıdır: `python` komutu Microsoft Store'un sahte kısayoluna gidebilir. Çözüm `py -3.12` başlatıcısıdır. |
+| **2 numaralı tuzak** | PowerShell varsayılan olarak script çalıştırmayı yasaklar; `Activate.ps1` engellenir. Çözüm `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. |
+
+Ayrıntısı: [SETUP_WINDOWS.md](SETUP_WINDOWS.md). Dikkat edilecek bir nokta: `_embedding_device_default()` içindeki "embedding'i CPU'ya zorla" kuralı **yalnızca Apple Silicon içindir**; Windows'ta varyantı Foundry Local seçer.
+
 Bu projenin kullandığı modeller:
 
 | Rol | Alias | Boyut / not |
@@ -248,13 +261,26 @@ Dört alıştırma var. Sırayla yapın: A1.3, A1.2'nin tamamlanmış olmasını
 
 **Adımlar**
 
-1. `docs/SETUP_MACOS.md` dosyasını baştan sona okuyun, sonra adımları uygulayın. Özet komut dizisi:
+1. İşletim sisteminizin kurulum rehberini baştan sona okuyun, sonra adımları uygulayın: [SETUP_MACOS.md](SETUP_MACOS.md) veya [SETUP_WINDOWS.md](SETUP_WINDOWS.md). Özet komut dizisi:
+
+   **macOS:**
 
    ```bash
    brew install python@3.12
    cd ~/Desktop/foundry-local-rag
    /opt/homebrew/bin/python3.12 -m venv .venv
    source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+   **Windows (PowerShell):**
+
+   ```powershell
+   winget install Python.Python.3.12
+   cd $HOME\Desktop\foundry-local-rag
+   py -3.12 -m venv .venv
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   .venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    ```
 
@@ -267,7 +293,9 @@ Dört alıştırma var. Sırayla yapın: A1.3, A1.2'nin tamamlanmış olmasını
    which python            # .../foundry-local-rag/.venv/bin/python olmali
    ```
 
-   `/usr/bin/python3` görüyorsanız sanal ortam etkin değildir. `source .venv/bin/activate` komutunu tekrarlayın.
+   Windows'ta ikinci komutun karşılığı `Get-Command python`'dur; `...\.venv\Scripts\python.exe` göstermelidir.
+
+   macOS'ta `/usr/bin/python3`, Windows'ta `...\WindowsApps\python.exe` görüyorsanız sanal ortam etkin değildir. Etkinleştirme komutunu tekrarlayın.
 
 3. Ortam kontrolünü çalıştırın:
 

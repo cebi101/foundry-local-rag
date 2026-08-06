@@ -8,15 +8,38 @@ on:
 
 jobs:
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is macOS's system Python: the core library and the offline
-        # backend must keep working there even though Foundry Local cannot.
-        # 3.12 is the recommended version for the real setup.
-        python-version: ["3.9", "3.12"]
+        # The summer school is run on both Windows and macOS laptops, so
+        # "it works on my machine" has to mean all three platforms. Ubuntu
+        # stands in for Linux and is where the cheap jobs run.
+        include:
+          # 3.9 is macOS's system Python: the core library and the offline
+          # backend must keep working there even though Foundry Local cannot.
+          - os: ubuntu-latest
+            python-version: "3.9"
+          # 3.12 is the recommended version for the real setup.
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+
+    env:
+      # The corpus, the questions and every answer are Turkish. Without this,
+      # redirected output on Windows falls back to the legacy code page and
+      # dies with UnicodeEncodeError on the first 'ı'.
+      PYTHONUTF8: "1"
+
+    defaults:
+      run:
+        # Git Bash on the Windows runner, so one script works everywhere and
+        # quoting of the Turkish smoke-test question stays identical.
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
@@ -50,5 +73,7 @@ jobs:
 
       - name: Environment doctor
         # Informational: on CI this reports "Foundry Local not installed",
-        # which is expected. Never fails the build.
+        # which is expected. Never fails the build. It also proves the platform
+        # advice stays correct -- doctor.py must not tell the Windows runner to
+        # install Homebrew.
         run: python scripts/doctor.py || true

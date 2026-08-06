@@ -2,13 +2,16 @@
 
     python scripts/doctor.py
 
-It verifies, in order, the things that actually go wrong on macOS:
+It verifies, in order, the things that actually go wrong:
 
-1. CPU architecture -- the Foundry Local native wheels are arm64-only
+1. CPU architecture -- Foundry Local ships native wheels per OS/architecture
 2. Python version -- the SDK needs >= 3.11 and macOS ships 3.9
 3. which SDK generation is installed -- 0.x and 1.x share a package name
 4. numpy / streamlit
 5. whether the Foundry Local catalog resolves the configured model aliases
+
+Advice is platform-aware. A checker that tells a Windows user to run ``brew``
+has not helped them; it has cost them the afternoon.
 """
 
 from __future__ import annotations
@@ -22,11 +25,58 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if SRC.is_dir() and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+try:
+    from foundry_rag.backends.foundry import venv_setup_command
+except ImportError:  # broken checkout -- check_foundry_catalog reports it properly
+
+    def venv_setup_command() -> str:
+        return "pip install -r requirements.txt"
+
+
 OK = "  [ok]  "
 WARN = "  [!!]  "
 BAD = "  [XX]  "
 
 problems: list[str] = []
+
+# Foundry Local publishes native wheels per OS *and* architecture. macOS is the
+# strict one -- arm64 only, no Intel build exists at all -- so the old bare
+# "is it arm64?" test flagged every healthy Windows and Linux machine and told
+# it to escape Rosetta, which is not a thing outside macOS.
+SUPPORTED_ARCH = {
+    "Darwin": {"arm64"},
+    "Windows": {"amd64", "arm64"},
+    "Linux": {"x86_64", "amd64", "aarch64", "arm64"},
+}
+
+ARCH_HINT = {
+    "Darwin": (
+        "Foundry Local yalnizca macOS arm64 (Apple Silicon) icin wheel yayinliyor. "
+        "Rosetta altinda calisan bir Python kullaniyorsan arm64 bir yorumlayiciya gec."
+    ),
+    "Windows": (
+        "Foundry Local x64 ve ARM64 Windows icin wheel yayinliyor. 32-bit bir Python "
+        "kullaniyorsan 64-bit surumune gec."
+    ),
+    "Linux": "Foundry Local bu mimari icin wheel yayinlamiyor olabilir.",
+}
+
+
+def architecture_status(system: str, machine: str) -> tuple[str, str]:
+    """Grade this OS/architecture pair. Returns ``(status, hint)``.
+
+    Split out from :func:`check_platform` so the per-OS rules can be tested
+    without pretending to be another operating system.
+    """
+    supported = SUPPORTED_ARCH.get(system)
+    if supported is None:
+        return WARN, (
+            f"'{system}' bu proje icin test edilmedi. Cevrimdisi yedek backend "
+            "her platformda calisir: python -m app.cli --backend hashing ingest"
+        )
+    if machine.lower() in supported:
+        return OK, ""
+    return WARN, ARCH_HINT[system]
 
 
 def report(status: str, message: str, fix: str = "") -> None:
@@ -40,14 +90,8 @@ def report(status: str, message: str, fix: str = "") -> None:
 def check_platform() -> None:
     print("\n--- Platform ---")
     machine = platform.machine()
-    report(
-        OK if machine == "arm64" else WARN,
-        f"islemci mimarisi: {machine}",
-        ""
-        if machine == "arm64"
-        else "Foundry Local yalnizca macOS arm64 (Apple Silicon) icin wheel yayinliyor. "
-        "Rosetta altinda calisan bir Python kullaniyorsan arm64 bir yorumlayiciya gec.",
-    )
+    status, hint = architecture_status(platform.system(), machine)
+    report(status, f"islemci mimarisi: {machine}", hint)
     report(OK, f"isletim sistemi: {platform.platform()}")
 
 
@@ -61,8 +105,7 @@ def check_python() -> None:
         report(
             BAD,
             f"python: {label} -- Foundry Local SDK 1.x >= 3.11 istiyor",
-            "brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv "
-            "&& source .venv/bin/activate && pip install -r requirements.txt",
+            venv_setup_command(),
         )
 
     conn = sqlite3.connect(":memory:")

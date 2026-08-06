@@ -148,8 +148,13 @@ gec.
 [backend hatasi] Foundry Local SDK 1.x requires Python >= 3.11, but this interpreter is 3.9.
 macOS ships 3.9 as /usr/bin/python3 and pip will silently install the
 incompatible 0.5.1 SDK instead of erroring.
-Fix:  brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
+Fix:  brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 ```
+
+> Bu mesajin son iki satiri **isletim sistemine gore degisir**
+> (`venv_setup_command()` ve `_old_python_reason()`, `backends/foundry.py`).
+> Yukaridaki macOS surumudur; Windows'ta `winget` ve `py -3.12` iceren
+> karsiligini gorursun. Windows kurulumu: [SETUP_WINDOWS.md](SETUP_WINDOWS.md).
 
 Varsayilan `--backend auto` ile ise hata degil, **uyari** alirsin ve proje
 calismaya devam eder:

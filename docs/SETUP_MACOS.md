@@ -6,6 +6,10 @@ Bu rehber, projeyi sıfırdan bir Mac'te çalışır hale getirir. Komutlar kopy
 Rehberi sırayla uygula. Adımları atlarsan, en sık karşılaşılan tuzağa (bölüm 2) düşersin
 ve saatlerce hata mesajı okursun.
 
+> Windows kullanıyorsan bu rehber sana göre değil: [SETUP_WINDOWS.md](SETUP_WINDOWS.md).
+> Tuzaklar farklıdır — orada sorun Python'un sürümü değil, `python` komutunun
+> Microsoft Store'a gitmesi ve PowerShell'in script çalıştırmayı yasaklamasıdır.
+
 **Bittiğinde elinde ne olacak:**
 
 - `python3.12` tabanlı bir sanal ortam (`.venv`)
@@ -356,7 +360,7 @@ gerçekten alınan çıktıdır. Bölüm 3'ü atlarsan böyle görünür:
 --- Foundry Local katalogu ---
   [!!]  Foundry Local baslatilamadi: Foundry Local SDK 1.x requires Python >= 3.11, but this interpreter is 3.9.
 macOS ships 3.9 as /usr/bin/python3 and pip will silently install the incompatible 0.5.1 SDK instead of erroring.
-Fix:  brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
+Fix:  brew install python@3.12 && /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
          -> Cevrimdisi yedek backend ile calisabilirsin: python -m app.cli --backend hashing ingest
 
 ==============================================================

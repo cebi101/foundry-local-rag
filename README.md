@@ -177,7 +177,7 @@ Getirme (retrieval) katmanının çalıştığını görmek için yeterlidir.
 
 ### 2. Gerçek kurulum (Foundry Local ile)
 
-> **macOS'ta sistem Python'u ile çalışmaz.** Sebebi ve çözümü aşağıda.
+**macOS** — sistem Python'u (3.9) ile çalışmaz, sebebi aşağıda:
 
 ```bash
 # 1) Modern Python (macOS'un 3.9'u yetmez)
@@ -197,6 +197,24 @@ python -m app.cli ingest
 # 5) Sor
 python -m app.cli chat
 ```
+
+**Windows (PowerShell)** — `python` komutu Microsoft Store'a gidebilir, `py -3.12` kullanın:
+
+```powershell
+# 1) Modern Python
+winget install Python.Python.3.12
+py -3.12 -m venv .venv
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # Activate.ps1 aksi halde engellenir
+.venv\Scripts\Activate.ps1
+
+# 2-5) Gerisi aynı
+pip install -r requirements.txt
+python scripts\doctor.py
+python -m app.cli ingest
+python -m app.cli chat
+```
+
+Ayrıntılı rehberler: [macOS](docs/SETUP_MACOS.md) · [Windows](docs/SETUP_WINDOWS.md)
 
 ### 3. Web arayüzü
 
@@ -341,8 +359,8 @@ model indirmeye ihtiyaç duymaz.
 | [5](docs/hafta-5-test-degerlendirme.md) | Test, değerlendirme metrikleri, performans | Kapanış |
 | [6](docs/hafta-6-dokumantasyon-sunum.md) | Dokümantasyon, kod temizliği, final sunumu | Kapanış |
 
-Ayrıca: [Kurulum](docs/SETUP_MACOS.md) · [Mimari](docs/ARCHITECTURE.md) ·
-[Sorun giderme](docs/TROUBLESHOOTING.md)
+Ayrıca: Kurulum ([macOS](docs/SETUP_MACOS.md) · [Windows](docs/SETUP_WINDOWS.md)) ·
+[Mimari](docs/ARCHITECTURE.md) · [Sorun giderme](docs/TROUBLESHOOTING.md)
 
 ---
 
@@ -359,11 +377,18 @@ Ayrıca: [Kurulum](docs/SETUP_MACOS.md) · [Mimari](docs/ARCHITECTURE.md) ·
 **Bilinmesi gerekenler:**
 
 - macOS'ta **Intel desteği yoktur**. Yalnızca Apple Silicon wheel'leri yayınlanır.
+  Windows'ta hem x64 hem ARM64 desteklenir.
 - Apple Silicon'da hızlandırma **ONNX Runtime WebGPU (Dawn → Metal)** üzerindendir;
   CoreML veya Neural Engine **kullanılmaz**. Aksini söyleyen kaynaklar yanlıştır.
+  Windows'ta seçim donanıma göre yapılır (CUDA / NPU / CPU).
+- **Ölçülmüş sayılar macOS arm64'te üretildi.** Getirme, füzyon ve denetim katmanları
+  saf Python + numpy olduğu için platformdan bağımsızdır (CI Ubuntu'da koşuyor), ama
+  hangi model varyantının seçileceği donanıma bağlıdır. Başka bir platformdaysanız
+  `python eval/calibrate.py` ile eşiği kendi makinenizde ölçün.
 - `brew install foundrylocal` **önerilmez**: tap yaklaşık 6 ay eskidir ve embedding
   desteği gelmeden önceki sürümü kurar. Bu proje CLI'ye ihtiyaç duymaz — SDK 1.x
-  çalışma zamanını kendi içinde taşır.
+  çalışma zamanını kendi içinde taşır. Windows'ta da
+  `winget install Microsoft.FoundryLocal` gerekmez.
 - `brew install foundry` tamamen **başka bir yazılım** kurar (Ethereum aracı).
 - Varsayılan sohbet modeli `qwen2.5-0.5b` küçüktür ve Türkçede zayıftır. Daha iyi
   sonuç için `FRAG_CHAT_MODEL=qwen3-1.7b` deneyin.
